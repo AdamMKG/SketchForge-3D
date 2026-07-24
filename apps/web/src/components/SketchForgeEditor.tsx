@@ -8533,8 +8533,8 @@ export function SketchForgeEditor({
             selected={sketchSelection}
             measurement={sketchMeasurement}
             pendingMeasurementStart={sketchMeasureStart}
-            initialSnap={initialSnap}
-            initialWorkspace={initialWorkspace}
+            initialSnap={snapGrid}
+            initialWorkspace={workspaceSettings}
             onPlanePoint={addSketchPlanePoint}
             onPointPress={pressSketchPoint}
             onSelectSegment={(id) => {
@@ -8574,8 +8574,8 @@ export function SketchForgeEditor({
           mirrorReferenceShapes={shapes}
           placementElevation={placementElevation}
           workplaneMode={workplaneMode}
-          initialSnap={initialSnap}
-          initialWorkspace={initialWorkspace}
+          initialSnap={snapGrid}
+          initialWorkspace={workspaceSettings}
           workspaceSettingsKey={projectId ?? "local-workplane"}
           onAddShape={addShape}
           onAlignAnchorChange={chooseAlignAnchor}
