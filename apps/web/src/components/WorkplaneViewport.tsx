@@ -401,6 +401,10 @@ function previewShapesForDrag(shapes: WorkplaneShape[], drag: DragState | null) 
   });
 }
 
+function shouldBuildCutPreviews(transform: TransformDragState | null, drag: DragState | null) {
+  return !drag && (!transform || transform.kind === "scale" || transform.kind === "height");
+}
+
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
@@ -1740,7 +1744,7 @@ export function WorkplaneViewport({
 
   useEffect(() => {
     shapesRef.current = shapes;
-    rebuildShapes(threeRef.current, shapes, renderSelectionIds(), !transformRef.current && !dragRef.current);
+    rebuildShapes(threeRef.current, shapes, renderSelectionIds(), shouldBuildCutPreviews(transformRef.current, dragRef.current));
     refreshDragPreviewObjects(threeRef.current, dragRef.current);
     if (threeRef.current) {
       syncTransformOverlay(
@@ -1788,7 +1792,7 @@ export function WorkplaneViewport({
       setActiveTransformKind(null);
     }
     selectedIdsRef.current = selectedIds;
-    rebuildShapes(threeRef.current, shapesRef.current, renderSelectionIds(selectedIds), !transformRef.current && !dragRef.current);
+    rebuildShapes(threeRef.current, shapesRef.current, renderSelectionIds(selectedIds), shouldBuildCutPreviews(transformRef.current, dragRef.current));
     refreshDragPreviewObjects(threeRef.current, dragRef.current);
     if (threeRef.current) {
       syncTransformOverlay(
@@ -2477,7 +2481,9 @@ export function WorkplaneViewport({
         setRotationReadout(null);
       }
       if (state) {
-        clearCutPreviewOverlays(state);
+        if (kind !== "scale" && kind !== "height") {
+          clearCutPreviewOverlays(state);
+        }
         state.needsRender = true;
         state.controls.enabled = false;
       }
@@ -3058,7 +3064,9 @@ export function WorkplaneViewport({
         } else {
           setRotationReadout(null);
         }
-        clearCutPreviewOverlays(state);
+        if (handle.kind !== "scale" && handle.kind !== "height") {
+          clearCutPreviewOverlays(state);
+        }
         state.needsRender = true;
         state.controls.enabled = false;
         onInteractionActiveChange?.(true);
@@ -3147,7 +3155,6 @@ export function WorkplaneViewport({
         primaryStartZ: shape.z,
         items,
       };
-      clearCutPreviewOverlays(state);
       state.needsRender = true;
       state.controls.enabled = false;
       onInteractionActiveChange?.(true);
@@ -3238,6 +3245,7 @@ export function WorkplaneViewport({
           workspaceRef.current.accuracy,
           true,
         );
+        syncCutPreviewOverlays(threeRef.current, previewShapes);
         threeRef.current.lastOverlaySync = performance.now();
         threeRef.current.needsRender = true;
       }
@@ -3678,7 +3686,7 @@ export function WorkplaneViewport({
               rotationReadout={rotationReadout}
               showRotationWheel={activeRotationWheel}
               hideSelectionChrome={activeTransformKind === "rotate"}
-              hideDimensionMarks={activeTransformKind === "scale"}
+              hideDimensionMarks={false}
               rotationWheelAxis={rotationWheelAxis}
               pinnedRotationWheelView={pinnedRotationWheelView}
               onBeginCameraDrag={beginCameraDragFromOverlay}
