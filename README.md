@@ -82,7 +82,7 @@ On Windows, you can open PowerShell in the folder by opening the folder, clickin
 
 ## Docker / FabLab Server (Recommended)
 
-Docker is the easiest way to run SketchForge for a classroom, workshop, or FabLab. It packages the build tools, static website, Nginx server, health check, and restart behavior together.
+Docker is the easiest way to run SketchForge for a classroom, workshop, or FabLab. It packages the build tools, Next.js server, health check, persistent shared-project storage, and restart behavior together.
 
 ### What You Need
 
@@ -129,6 +129,8 @@ http://127.0.0.1:3000/
 ```
 
 If that works, SketchForge is running.
+
+The container listens on port `3000`. It also accepts connections on port `80` for backward compatibility with older UnRAID templates and forwards them to the same server. New Docker and UnRAID configurations should use container port `3000`.
 
 ### Shared Docker Projects
 

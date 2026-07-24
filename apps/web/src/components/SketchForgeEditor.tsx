@@ -18,6 +18,7 @@ import optimerBoldFontJson from "three/examples/fonts/optimer_bold.typeface.json
 import { manifoldModuleSource } from "@/generated/manifoldModuleSource";
 import { manifoldWasmBase64 } from "@/generated/manifoldWasmBase64";
 import { sphereTessellation } from "@/lib/sphereTessellation";
+import { createGearGeometry } from "@/lib/gearGeometry";
 import {
   ToolbarAlignIcon,
   ToolbarChamferIcon,
@@ -80,6 +81,7 @@ import { createLocalId } from "@/lib/localIds";
 import { projectExportFileName } from "@/lib/exportNames";
 import { attachProjectAsset, dedupeProjectAssets, projectAssetFromBytes, sourceFormatForFileName } from "@/lib/projectAssets";
 import { findSketchOutlineIntersection } from "@/lib/sketchProfileValidation";
+import { buildSketchRevolveMesh, DEFAULT_SKETCH_REVOLVE_SETTINGS, normalizeSketchRevolveSettings, type SketchRevolveMesh } from "@/lib/sketchRevolve";
 import { exportSkfProject, SKF_MEDIA_TYPE } from "@/lib/skfProject";
 import { makeShapeFromAsset, sceneShape, toolbarShapeAssets, type ToolbarShapeAsset } from "@/lib/shapeCatalog";
 import { importedShapeFromStl, importExtensionSupported } from "@/lib/stlImport";
@@ -95,7 +97,7 @@ import {
   type SketchForgeMcpViewFace,
 } from "@/lib/sketchforgeMcpProtocol";
 import type { CadModifierComponentMesh, CadModifierDisplayEdge, CadModifierEdge, CadModifierKind, CadModifierMeshPart, CadModifierPrimitivePart, CadModifierQuality, CadModifierWorkerRequest, CadModifierWorkerResponse } from "@/lib/cadModifierTypes";
-import type { AlignAxis, AlignHandleStatus, AlignTarget, GridSize, ProjectAsset, ShapeAsset, SketchImage, SketchPoint, SketchProfile, SketchSegment, WorkplaneShape, WorkplaneWorkspaceSettings } from "@/types/sketchforge";
+import type { AlignAxis, AlignHandleStatus, AlignTarget, GridSize, ProjectAsset, ShapeAsset, SketchImage, SketchOperation, SketchPoint, SketchProfile, SketchRevolveSettings, SketchSegment, WorkplaneShape, WorkplaneWorkspaceSettings } from "@/types/sketchforge";
 
 export { importedShapeFromStl, importedShapeFromSvg };
 
@@ -390,6 +392,7 @@ async function shapeFromResolvedSketchProfile(
         sourceFormat: "json",
       },
       sketchProfile: cloneSketchProfile(profile),
+      sketchOperation: "extrude",
     } satisfies WorkplaneShape);
   } finally {
     [...new Set(disposable)].reverse().forEach(disposeManifold);
@@ -505,6 +508,50 @@ async function shapeFromSketchProfile(profile: SketchProfile, height: number, ex
       sourceFormat: "json",
     },
     sketchProfile: cloneSketchProfile(profile),
+    sketchOperation: "extrude",
+  } satisfies WorkplaneShape);
+}
+
+async function shapeFromRevolvedSketchProfile(
+  profile: SketchProfile,
+  settings: Partial<SketchRevolveSettings>,
+  existing?: WorkplaneShape | null,
+) {
+  const runtime = await getManifoldRuntime();
+  const normalizedSettings = normalizeSketchRevolveSettings(settings);
+  const mesh = buildSketchRevolveMesh(runtime, profile, normalizedSettings);
+  return canonicalizeShape({
+    id: existing?.id ?? createLocalId("sketch-revolve"),
+    name: existing?.name ?? "Sketch revolve",
+    kind: "mesh",
+    color: existing?.color ?? "#78b96b",
+    hole: existing?.hole,
+    x: existing?.x ?? 0,
+    z: existing?.z ?? 0,
+    elevation: existing?.elevation ?? 0,
+    size: Math.max(mesh.width, mesh.depth),
+    width: mesh.width,
+    depth: mesh.depth,
+    height: mesh.height,
+    rotation: existing?.rotation ?? 0,
+    rotationX: existing?.rotationX ?? 0,
+    rotationZ: existing?.rotationZ ?? 0,
+    mirrorX: existing?.mirrorX,
+    mirrorY: existing?.mirrorY,
+    mirrorZ: existing?.mirrorZ,
+    importedMesh: {
+      positions: mesh.positions,
+      baseWidth: mesh.width,
+      baseDepth: mesh.depth,
+      baseHeight: mesh.height,
+      triangleCount: mesh.triangleCount,
+      sourceFormat: "json",
+    },
+    sketchProfile: cloneSketchProfile(profile),
+    sketchOperation: "revolve",
+    sketchRevolve: normalizedSettings,
+    locked: existing?.locked ?? false,
+    hidden: existing?.hidden ?? false,
   } satisfies WorkplaneShape);
 }
 
@@ -2028,6 +2075,20 @@ function geometryMeshForShape(shape: WorkplaneShape): MeshData | null {
     case "ring":
     case "tube":
       geometry = createBooleanHollowCylinderGeometry(width, height, depth, shape.bevel ?? 4, 144);
+      break;
+    case "gear":
+      geometry = createGearGeometry({
+        width,
+        depth,
+        height,
+        teeth: shape.teeth,
+        toothSize: shape.toothSize,
+        toothWidth: shape.toothWidth,
+        centerHoleSize: shape.centerHoleSize,
+        gearType: shape.gearType,
+        helixAngle: shape.helixAngle,
+        helixQuality: shape.helixQuality,
+      });
       break;
     case "wedge":
       geometry = createBooleanWedgeGeometry(width, height, depth);
@@ -5229,6 +5290,12 @@ export function SketchForgeEditor({
   const [projectInteractionActive, setProjectInteractionActive] = useState(false);
   const [toolbarMode, setToolbarMode] = useState<ToolbarMode>("geometry");
   const [sketchActive, setSketchActive] = useState(false);
+  const [sketchOperation, setSketchOperation] = useState<SketchOperation>("extrude");
+  const [sketchRevolveSettings, setSketchRevolveSettings] = useState<SketchRevolveSettings>(() => ({ ...DEFAULT_SKETCH_REVOLVE_SETTINGS }));
+  const [sketchRevolvePreview, setSketchRevolvePreview] = useState<SketchRevolveMesh | null>(null);
+  const sketchRevolvePreviewRequestRef = useRef(0);
+  const sketchRevolveUpdateRequestRef = useRef(new Map<string, number>());
+  const sketchRevolveUpdateTimerRef = useRef(new Map<string, number>());
   const [sketchTool, setSketchTool] = useState<SketchTool>("line");
   const [sketchProfile, setSketchProfile] = useState<SketchProfile>(() => emptySketchProfile());
   const [sketchHistory, setSketchHistory] = useState<SketchProfile[]>([emptySketchProfile()]);
@@ -5531,6 +5598,26 @@ export function SketchForgeEditor({
   useEffect(() => {
     edgeModifierRef.current = edgeModifier;
   }, [edgeModifier]);
+
+  useEffect(() => {
+    const requestId = sketchRevolvePreviewRequestRef.current + 1;
+    sketchRevolvePreviewRequestRef.current = requestId;
+    if (!sketchActive || sketchOperation !== "revolve" || sketchProfile.segments.length === 0) {
+      setSketchRevolvePreview(null);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void getManifoldRuntime()
+        .then((runtime) => buildSketchRevolveMesh(runtime, sketchProfile, sketchRevolveSettings))
+        .then((mesh) => {
+          if (sketchRevolvePreviewRequestRef.current === requestId) setSketchRevolvePreview(mesh);
+        })
+        .catch(() => {
+          if (sketchRevolvePreviewRequestRef.current === requestId) setSketchRevolvePreview(null);
+        });
+    }, 90);
+    return () => window.clearTimeout(timer);
+  }, [sketchActive, sketchOperation, sketchProfile, sketchRevolveSettings]);
 
   useEffect(() => {
     setWorkspaceSettings(normalizeWorkspaceSettings(initialWorkspace));
@@ -5854,10 +5941,13 @@ export function SketchForgeEditor({
     [],
   );
 
-  const beginSketch = useCallback((profile?: SketchProfile, editingId: string | null = null) => {
+  const beginSketch = useCallback((operation: SketchOperation, profile?: SketchProfile, editingId: string | null = null, revolveSettings?: Partial<SketchRevolveSettings>) => {
     const initial = cloneSketchProfile(profile ?? emptySketchProfile());
     setToolbarMode("sketch");
     setSketchActive(true);
+    setSketchOperation(operation);
+    setSketchRevolveSettings(normalizeSketchRevolveSettings(revolveSettings));
+    setSketchRevolvePreview(null);
     setSketchTool(profile?.segments.length ? "select" : "line");
     setSketchProfile(initial);
     const initialHistory = [cloneSketchProfile(initial)];
@@ -5870,7 +5960,7 @@ export function SketchForgeEditor({
     setSketchMeasureStart(null);
     setSketchMeasurement(null);
     setEditingSketchShapeId(editingId);
-    setNotice(editingId ? "Editing sketch profile" : "Sketch started: place the first point");
+    setNotice(editingId ? `Editing ${operation} sketch profile` : operation === "revolve" ? "Revolve sketch started: draw on the left side of the axis" : "Sketch started: place the first point");
   }, []);
 
   const beginSketchEdit = useCallback(() => {
@@ -5878,7 +5968,8 @@ export function SketchForgeEditor({
       setNotice("Select one shape created from a sketch to edit it");
       return;
     }
-    beginSketch(selectedShape.sketchProfile, selectedShape.id);
+    const operation = selectedShape.sketchOperation ?? (selectedShape.sketchRevolve ? "revolve" : "extrude");
+    beginSketch(operation, selectedShape.sketchProfile, selectedShape.id, selectedShape.sketchRevolve);
   }, [beginSketch, selectedShape, selectedShapes.length]);
 
   const cancelSketch = useCallback(() => {
@@ -5888,6 +5979,7 @@ export function SketchForgeEditor({
     setSketchMeasureStart(null);
     setSketchMeasurement(null);
     setEditingSketchShapeId(null);
+    setSketchRevolvePreview(null);
     setNotice("Sketch cancelled");
   }, []);
 
@@ -6228,23 +6320,27 @@ export function SketchForgeEditor({
   const finishSketch = useCallback(async () => {
     const existing = editingSketchShapeId ? shapes.find((shape) => shape.id === editingSketchShapeId) ?? null : null;
     const height = existing?.height ?? 10;
-    let extruded: WorkplaneShape | null;
+    let resolved: WorkplaneShape | null;
     try {
-      extruded = await shapeFromSketchProfile(sketchProfile, height, existing);
+      resolved = sketchOperation === "revolve"
+        ? await shapeFromRevolvedSketchProfile(sketchProfile, sketchRevolveSettings, existing)
+        : await shapeFromSketchProfile(sketchProfile, height, existing);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "The sketch profile cannot be converted to 3D");
+      setNotice(error instanceof Error ? error.message : `The sketch profile cannot be ${sketchOperation === "revolve" ? "revolved" : "extruded"} to 3D`);
       return;
     }
-    if (!extruded) {
+    if (!resolved) {
       setNotice("Close at least one profile before finishing the sketch");
       return;
     }
-    const nextShapes = existing ? shapes.map((shape) => (shape.id === existing.id ? extruded : shape)) : [...shapes, extruded];
-    commitShapes(nextShapes, extruded.id, existing ? "Sketch updated" : "Sketch created at 10 mm height");
+    const nextShapes = existing ? shapes.map((shape) => (shape.id === existing.id ? resolved : shape)) : [...shapes, resolved];
+    const action = sketchOperation === "revolve" ? "Revolve sketch" : "Sketch";
+    commitShapes(nextShapes, resolved.id, existing ? `${action} updated` : sketchOperation === "revolve" ? "Revolved sketch created" : "Sketch created at 10 mm height");
     setSketchActive(false);
+    setSketchRevolvePreview(null);
     setEditingSketchShapeId(null);
     setToolbarMode("geometry");
-  }, [commitShapes, editingSketchShapeId, shapes, sketchProfile]);
+  }, [commitShapes, editingSketchShapeId, shapes, sketchOperation, sketchProfile, sketchRevolveSettings]);
 
   useEffect(() => {
     if (!projectId) {
@@ -6313,6 +6409,8 @@ export function SketchForgeEditor({
       if (interactionHistoryTimerRef.current !== null) {
         window.clearTimeout(interactionHistoryTimerRef.current);
       }
+      sketchRevolveUpdateTimerRef.current.forEach((timer) => window.clearTimeout(timer));
+      sketchRevolveUpdateTimerRef.current.clear();
     };
   }, []);
 
@@ -6324,10 +6422,72 @@ export function SketchForgeEditor({
     [commitShapes, placementElevation, shapes],
   );
 
+  const scheduleRevolveShapeUpdate = useCallback((id: string, settings: SketchRevolveSettings) => {
+    const previousTimer = sketchRevolveUpdateTimerRef.current.get(id);
+    if (previousTimer !== undefined) window.clearTimeout(previousTimer);
+    const requestId = (sketchRevolveUpdateRequestRef.current.get(id) ?? 0) + 1;
+    sketchRevolveUpdateRequestRef.current.set(id, requestId);
+    const timer = window.setTimeout(() => {
+      sketchRevolveUpdateTimerRef.current.delete(id);
+      const source = shapesRef.current.find((shape) => shape.id === id);
+      if (!source?.sketchProfile || source.sketchOperation !== "revolve") return;
+      setNotice("Updating revolve preview…");
+      void shapeFromRevolvedSketchProfile(source.sketchProfile, settings, source)
+        .then((generated) => {
+          if (sketchRevolveUpdateRequestRef.current.get(id) !== requestId) return;
+          const current = shapesRef.current.find((shape) => shape.id === id);
+          if (!current?.importedMesh || current.sketchOperation !== "revolve") return;
+          const widthScale = current.width / Math.max(0.001, current.importedMesh.baseWidth);
+          const depthScale = current.depth / Math.max(0.001, current.importedMesh.baseDepth);
+          const heightScale = current.height / Math.max(0.001, current.importedMesh.baseHeight);
+          const width = generated.width * widthScale;
+          const depth = generated.depth * depthScale;
+          const height = generated.height * heightScale;
+          const updated = canonicalizeShape({
+            ...generated,
+            id: current.id,
+            name: current.name,
+            color: current.color,
+            hole: current.hole,
+            x: current.x,
+            z: current.z,
+            elevation: current.elevation,
+            width,
+            depth,
+            height,
+            size: Math.max(width, depth),
+            rotation: current.rotation,
+            rotationX: current.rotationX,
+            rotationZ: current.rotationZ,
+            mirrorX: current.mirrorX,
+            mirrorY: current.mirrorY,
+            mirrorZ: current.mirrorZ,
+            locked: current.locked,
+            hidden: current.hidden,
+            sketchRevolve: settings,
+          });
+          commitShapes(shapesRef.current.map((shape) => shape.id === id ? updated : shape), selectedIdsRef.current, "Revolve updated");
+        })
+        .catch((error) => {
+          if (sketchRevolveUpdateRequestRef.current.get(id) === requestId) {
+            setNotice(error instanceof Error ? error.message : "The revolve settings could not be applied");
+          }
+        });
+    }, 120);
+    sketchRevolveUpdateTimerRef.current.set(id, timer);
+  }, [commitShapes]);
+
   const updateShape = useCallback(
     (id: string, patch: ShapeUpdatePatch) => {
       const bakeTransform = Boolean(patch.bakeTransform);
       const cleanedPatch = cleanShapePatch(patch);
+      if (cleanedPatch.sketchRevolve) {
+        const source = shapesRef.current.find((shape) => shape.id === id);
+        if (source?.sketchOperation === "revolve" && source.sketchProfile) {
+          scheduleRevolveShapeUpdate(id, normalizeSketchRevolveSettings(cleanedPatch.sketchRevolve));
+          return;
+        }
+      }
       const applyPatch = (current: WorkplaneShape[]) => {
         let changed = false;
         const next = current.map((shape) => {
@@ -6365,7 +6525,7 @@ export function SketchForgeEditor({
         commitShapes(next, selectedIds);
       }
     },
-    [commitShapes, selectedIds, shapes],
+    [commitShapes, scheduleRevolveShapeUpdate, selectedIds, shapes],
   );
 
   const deleteSelected = useCallback(() => {
@@ -8309,11 +8469,12 @@ export function SketchForgeEditor({
         edgeModifierKind={edgeModifier?.kind ?? null}
         mirrorMode={mirrorMode}
         sketchActive={sketchActive}
+        sketchOperation={sketchOperation}
         sketchTool={sketchTool}
         sketchCanUndo={sketchHistoryIndex > 0}
         sketchCanRedo={sketchHistoryIndex < sketchHistory.length - 1}
         canEditSketch={selectedShapes.length === 1 && Boolean(selectedShape?.sketchProfile)}
-        onStartSketch={() => beginSketch()}
+        onStartSketch={(operation) => beginSketch(operation)}
         onEditSketch={beginSketchEdit}
         onSketchTool={setActiveSketchTool}
         onSketchImage={() => {
@@ -8364,6 +8525,8 @@ export function SketchForgeEditor({
         {toolbarMode === "sketch" && sketchActive ? (
           <SketchWorkspace
             profile={sketchProfile}
+            operation={sketchOperation}
+            revolvePreviewPositions={sketchRevolvePreview?.positions ?? null}
             referenceShapes={shapes.filter((shape) => shape.id !== editingSketchShapeId)}
             tool={sketchTool}
             activePointId={sketchActivePointId}
@@ -8599,6 +8762,7 @@ function SecondaryToolbar({
   hasSelection,
   mirrorMode,
   sketchActive,
+  sketchOperation,
   sketchTool,
   sketchCanUndo,
   sketchCanRedo,
@@ -8649,11 +8813,12 @@ function SecondaryToolbar({
   hasSelection: boolean;
   mirrorMode: boolean;
   sketchActive: boolean;
+  sketchOperation: SketchOperation;
   sketchTool: SketchTool;
   sketchCanUndo: boolean;
   sketchCanRedo: boolean;
   canEditSketch: boolean;
-  onStartSketch: () => void;
+  onStartSketch: (operation: SketchOperation) => void;
   onEditSketch: () => void;
   onSketchTool: (tool: SketchTool) => void;
   onSketchImage: () => void;
@@ -8685,10 +8850,13 @@ function SecondaryToolbar({
   onAddShape: (shape: ShapeAsset) => void;
 }) {
   const [shapesOpen, setShapesOpen] = useState(false);
+  const [sketchCreateOpen, setSketchCreateOpen] = useState(false);
+  const sketchCreateMenuRef = useRef<HTMLDivElement>(null);
   const touchShapeStartRef = useRef<{ id: string; x: number; y: number } | null>(null);
   const suppressNextShapeClickRef = useRef(false);
   const selectToolbarMode = (mode: "geometry" | "sketch") => {
     setShapesOpen(false);
+    setSketchCreateOpen(false);
     onTopPanel(null);
     onToolbarModeChange(mode);
   };
@@ -8696,6 +8864,28 @@ function SecondaryToolbar({
     onAddShape(shape);
     setShapesOpen(false);
   };
+  const startSketch = (operation: SketchOperation) => {
+    setSketchCreateOpen(false);
+    onStartSketch(operation);
+  };
+  useEffect(() => {
+    if (!sketchCreateOpen) return;
+    const closeOnPointerDown = (event: PointerEvent) => {
+      if (!sketchCreateMenuRef.current?.contains(event.target as Node)) setSketchCreateOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSketchCreateOpen(false);
+    };
+    window.addEventListener("pointerdown", closeOnPointerDown);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("pointerdown", closeOnPointerDown);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [sketchCreateOpen]);
+  useEffect(() => {
+    if (sketchActive) setSketchCreateOpen(false);
+  }, [sketchActive]);
   const leftTools = [
     { label: "Copy", icon: ToolbarCopyIcon, action: onCopy, enabled: hasSelection },
     { label: "Paste", icon: ToolbarPasteIcon, action: onPaste, enabled: hasClipboard },
@@ -8945,7 +9135,7 @@ function SecondaryToolbar({
                   <div className="toolbar-section-tools">
                     <button className="sketch-command-button primary" type="button" onClick={onSketchFinish}>
                       <Check />
-                      <span>Finish sketch</span>
+                      <span>{sketchOperation === "revolve" ? "Finish revolve" : "Finish sketch"}</span>
                     </button>
                     <button className="sketch-command-button cancel" type="button" onClick={onSketchCancel}>
                       <X />
@@ -8958,10 +9148,32 @@ function SecondaryToolbar({
               <div className="toolbar-section sketch-start-section">
                 <div className="toolbar-section-label">Create</div>
                 <div className="toolbar-section-tools">
-                  <button className="sketch-command-button primary" type="button" onClick={onStartSketch}>
-                    <SketchReferenceIcon name="sketchTo3d" />
-                    <span>Sketch to 3D</span>
-                  </button>
+                  <div className="sketch-create-menu" ref={sketchCreateMenuRef}>
+                    <button
+                      className={`sketch-command-button primary sketch-create-menu-trigger ${sketchCreateOpen ? "active" : ""}`}
+                      type="button"
+                      aria-label="Sketch to 3D options"
+                      aria-haspopup="menu"
+                      aria-expanded={sketchCreateOpen}
+                      onClick={() => setSketchCreateOpen((open) => !open)}
+                    >
+                      <SketchReferenceIcon name="sketchTo3d" />
+                      <span>Sketch to 3D</span>
+                      <ToolbarCaretDownIcon className="sketch-create-menu-chevron" />
+                    </button>
+                    {sketchCreateOpen ? (
+                      <div className="sketch-create-dropdown" role="menu" aria-label="Sketch to 3D method">
+                        <button type="button" role="menuitem" onClick={() => startSketch("extrude")}>
+                          <strong>Extrude sketch</strong>
+                          <span>Raise the profile into a 3D shape</span>
+                        </button>
+                        <button type="button" role="menuitem" onClick={() => startSketch("revolve")}>
+                          <strong>Revolve sketch</strong>
+                          <span>Rotate the profile around an axis</span>
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
                   <button className={`sketch-command-button ${canEditSketch ? "" : "disabled"}`} type="button" aria-label="Edit Sketch to 3D" title="Edit Sketch to 3D" onClick={onEditSketch} disabled={!canEditSketch}>
                     <SketchReferenceIcon name="editSketchTo3d" />
                     <span>Edit</span>

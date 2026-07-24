@@ -12,6 +12,7 @@ export type ShapeKind =
   | "halfSphere"
   | "torus"
   | "tube"
+  | "gear"
   | "ring"
   | "wedge"
   | "polygon"
@@ -105,6 +106,18 @@ export type SketchProfile = {
   images?: SketchImage[];
 };
 
+export type SketchOperation = "extrude" | "revolve";
+
+export type GearType = "spur" | "helical" | "bevel";
+
+export type SketchRevolveSettings = {
+  startAngle: number;
+  sweepAngle: number;
+  sides: number;
+  quality: number;
+  thickness: number;
+};
+
 export type EdgeTreatmentFeature = {
   kind: "fillet" | "chamfer";
   amount: number;
@@ -181,6 +194,13 @@ export type WorkplaneShape = {
   segments?: number;
   topRadius?: number;
   baseRadius?: number;
+  teeth?: number;
+  toothSize?: number;
+  toothWidth?: number;
+  centerHoleSize?: number;
+  gearType?: GearType;
+  helixAngle?: number;
+  helixQuality?: number;
   text?: string;
   font?: string;
   importedMesh?: {
@@ -206,6 +226,8 @@ export type WorkplaneShape = {
     pixelHeight: number;
   };
   sketchProfile?: SketchProfile;
+  sketchOperation?: SketchOperation;
+  sketchRevolve?: SketchRevolveSettings;
   edgeTreatments?: EdgeTreatmentFeature[];
   edgeTreatmentHistory?: EdgeTreatmentHistoryEntry[];
   cadDisplayEdges?: CadDisplayEdge[];
