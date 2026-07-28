@@ -19,7 +19,7 @@
     <a href="https://github.com/Formsmith746/SketchForge-3D/stargazers"><img alt="Star SketchForge on GitHub" src="docs/media/badges/github-star.svg"></a>
     <a href="https://github.com/sponsors/Formsmith746"><img alt="Sponsor SketchForge on GitHub" src="docs/media/badges/github-sponsor.svg"></a>
     <img alt="Local first" src="https://img.shields.io/badge/local--first-no%20account-0ea5e9">
-    <img alt="Version 0.7.0" src="docs/media/badges/version-0.7.0.svg">
+    <img alt="Version 0.8.0" src="docs/media/badges/version-0.8.0.svg">
   </p>
 </div>
 
