@@ -42,6 +42,7 @@ export type ProjectAsset = {
 
 export type GridSize = "Off" | "0.1 mm" | "0.25 mm" | "0.5 mm" | "1.0 mm" | "2.0 mm" | "5.0 mm" | "Brick";
 export type MeasurementAccuracy = 1 | 2 | 3;
+export type HistoryRetentionLimit = "unlimited" | number;
 
 export type WorkplaneWorkspaceSettings = {
   width: number;
@@ -49,6 +50,7 @@ export type WorkplaneWorkspaceSettings = {
   sizePreset: string;
   gridBlockSize: number;
   gridBlockPreset: string;
+  gridColor: string;
   background: string;
   showShadows: boolean;
   showGrid: boolean;
@@ -57,6 +59,7 @@ export type WorkplaneWorkspaceSettings = {
   units: string;
   scale: string;
   accuracy: MeasurementAccuracy;
+  historyLimit: HistoryRetentionLimit;
 };
 
 export type AlignAxis = "x" | "y" | "z";
@@ -211,6 +214,9 @@ export type WorkplaneShape = {
     baseHeight: number;
     triangleCount: number;
     sourceFormat: "stl" | "obj" | "svg" | "json" | "step";
+    // IndexedDB persistence uses this only in compact stored shape records.
+    // Runtime editor shapes are hydrated with the full immutable mesh resource.
+    storageResourceId?: string;
     // Stable reference to the original imported file in the project's shared
     // asset table. Copies and grouped operands reuse this reference.
     assetId?: string;
