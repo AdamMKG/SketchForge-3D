@@ -23,7 +23,7 @@
   </p>
 </div>
 
-![SketchForge editor showing a selected box on the workplane](docs/media/sketchforge-editor-v0.7.0.png)
+![SketchForge editor showing a selected box on the workplane](docs/media/sketchforge-editor-v0.8.0.png)
 
 ## Why SketchForge
 
