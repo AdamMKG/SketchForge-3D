@@ -48,18 +48,22 @@ export function WorkspaceSettingsModal({
   workspace,
   snap,
   themePreference,
+  moveDimensionsEnabled,
   onWorkspaceChange,
   onSnapChange,
   onThemePreferenceChange,
+  onMoveDimensionsEnabledChange,
   onMakeDefault,
   onClose,
 }: {
   workspace: WorkspaceSettings;
   snap: GridSize;
   themePreference: AppThemePreference;
+  moveDimensionsEnabled: boolean;
   onWorkspaceChange: (next: WorkspaceSettings) => void;
   onSnapChange: (next: GridSize) => void;
   onThemePreferenceChange?: (preference: AppThemePreference) => void;
+  onMoveDimensionsEnabledChange: (enabled: boolean) => void;
   onMakeDefault: () => void;
   onClose: () => void;
 }) {
@@ -193,6 +197,11 @@ export function WorkspaceSettingsModal({
                     </select>
                   </label>
                   <p className="workspace-global-note">Theme applies across SketchForge and all projects.</p>
+                  <WorkspaceToggle
+                    label="Show movement dimensions"
+                    checked={moveDimensionsEnabled}
+                    onChange={onMoveDimensionsEnabledChange}
+                  />
                   <WorkspaceToggle label="Show shadows" checked={workspace.showShadows} onChange={(showShadows) => patchWorkspace({ showShadows })} />
                   <WorkspaceToggle
                     label="Cruise when adding new shapes"
@@ -367,7 +376,7 @@ export function WorkspaceSettingsModal({
                       </label>
                     ) : null}
                     <p className="workspace-history-note">
-                      Unlimited is the default. Lower limits permanently discard older Undo states from this project.
+                      100 actions is the default. Lower limits permanently discard older Undo states from this project.
                     </p>
                   </div>
                 </>
