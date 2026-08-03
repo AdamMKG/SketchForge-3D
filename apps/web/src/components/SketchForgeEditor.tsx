@@ -51,6 +51,7 @@ import { SketchWorkspace, type SketchMeasurement, type SketchSelection, type Ske
 import { EdgeModifierPanel } from "./workplane/EdgeModifierPanel";
 import {
   canonicalizeShape,
+  cloneWorkplaneShapeTreeWithFreshIds,
   cleanNearZero,
   cleanRotationDegrees,
   fallbackSolidColor,
@@ -6800,12 +6801,14 @@ export function SketchForgeEditor({
       setNotice("Select a shape first");
       return;
     }
-    const duplicates = selectedShapes.map((shape) => ({
-      ...shape,
-      id: createLocalId(`${shape.id}-copy`),
-      x: Math.min(110, shape.x + 8),
-      z: Math.min(110, shape.z + 8),
-    }));
+    const duplicates = selectedShapes.map((shape) => {
+      const duplicate = cloneWorkplaneShapeTreeWithFreshIds(shape, "copy");
+      return {
+        ...duplicate,
+        x: Math.min(110, shape.x + 8),
+        z: Math.min(110, shape.z + 8),
+      };
+    });
     commitShapes([...shapes, ...duplicates], duplicates.map((shape) => shape.id), `Duplicated ${duplicates.length} shape${duplicates.length === 1 ? "" : "s"}`);
   }, [commitShapes, hasSelection, selectedShapes, shapes]);
 
@@ -6835,12 +6838,14 @@ export function SketchForgeEditor({
     if (serializeShapesForSync(sourceClipboard) !== serializeShapesForSync(clipboard)) {
       setClipboard(sourceClipboard);
     }
-    const pasted = sourceClipboard.map((shape) => ({
-      ...shape,
-      id: createLocalId(`${shape.id}-paste`),
-      x: Math.min(110, shape.x + 12),
-      z: Math.min(110, shape.z + 12),
-    }));
+    const pasted = sourceClipboard.map((shape) => {
+      const pastedShape = cloneWorkplaneShapeTreeWithFreshIds(shape, "paste");
+      return {
+        ...pastedShape,
+        x: Math.min(110, shape.x + 12),
+        z: Math.min(110, shape.z + 12),
+      };
+    });
     commitShapes([...shapesRef.current, ...pasted], pasted.map((shape) => shape.id), `Pasted ${pasted.length} shape${pasted.length === 1 ? "" : "s"}`);
   }, [clipboard, commitShapes]);
 
