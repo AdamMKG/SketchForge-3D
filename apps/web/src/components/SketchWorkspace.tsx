@@ -608,14 +608,7 @@ export function SketchWorkspace({
         const end = pointById.get(segment.endId);
         return Boolean(start && end && (contains(start) || contains(end) || contains({ x: (start.x + end.x) / 2, z: (start.z + end.z) / 2 })));
       }).map((segment) => segment.id);
-      const imageIds = (profile.images ?? []).filter((image) => {
-        const imageMinX = image.x - image.width / 2;
-        const imageMaxX = image.x + image.width / 2;
-        const imageMinZ = image.z - image.depth / 2;
-        const imageMaxZ = image.z + image.depth / 2;
-        return imageMaxX >= minX && imageMinX <= maxX && imageMaxZ >= minZ && imageMinZ <= maxZ;
-      }).map((image) => image.id);
-      onSelectMany(pointIds, segmentIds, imageIds);
+      onSelectMany(pointIds, segmentIds, []);
       setPointerAction(null);
       return;
     }
@@ -745,7 +738,6 @@ export function SketchWorkspace({
                   if (event.button !== 0 || tool !== "select") return;
                   const point = pointFromEvent(event);
                   if (!point) return;
-                  onSelectImage(image.id);
                   beginEntityDrag(event, {
                     kind: "move-image",
                     pointerId: event.pointerId,
@@ -989,7 +981,7 @@ export function SketchWorkspace({
           <button type="button" title="Split handles" onClick={() => onSetPointMode(selectedPoint.id, "split")}><Split /><span>Split</span></button>
         </div>
       ) : null}
-      <div className="grid-settings sketch-grid-settings">
+      <div className="grid-settings">
         <SnapGridControl snap={snap} snapOpen={snapOpen} onSnapChange={setSnap} onSnapOpenChange={setSnapOpen} />
       </div>
     </main>
