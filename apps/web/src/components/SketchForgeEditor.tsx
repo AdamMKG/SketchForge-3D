@@ -86,12 +86,14 @@ import { snapShapeFootprintToVisibleGrid, visibleGridStep } from "@/lib/gridSnap
 import { createLocalId } from "@/lib/localIds";
 import { projectExportFileName } from "@/lib/exportNames";
 import { exportMeshesToObj } from "@/lib/objExport";
+import { importedShapeFromObj } from "@/lib/objImport";
 import { attachProjectAsset, dedupeProjectAssets, projectAssetFromBytes, sourceFormatForFileName } from "@/lib/projectAssets";
 import { findSketchOutlineIntersection } from "@/lib/sketchProfileValidation";
 import { buildSketchRevolveMesh, DEFAULT_SKETCH_REVOLVE_SETTINGS, normalizeSketchRevolveSettings, type SketchRevolveMesh } from "@/lib/sketchRevolve";
 import { exportSkfProject, SKF_MEDIA_TYPE } from "@/lib/skfProject";
 import { makeShapeFromAsset, sceneShape, toolbarShapeAssets, type ToolbarShapeAsset } from "@/lib/shapeCatalog";
-import { importedShapeFromStl, importExtensionSupported } from "@/lib/stlImport";
+import { importExtensionSupported } from "@/lib/importExtensions";
+import { importedShapeFromStl } from "@/lib/stlImport";
 import { exportMeshesToStl } from "@/lib/stlExport";
 import { importedShapeFromSvg, invalidSvgMeshReason } from "@/lib/svgImport";
 import { toSvgProjection, type SvgProjectionLayer } from "@/lib/svgExport";
@@ -119,7 +121,7 @@ import type { CadModifierComponentMesh, CadModifierDisplayEdge, CadModifierEdge,
 import type { SketchCadBuildResponse } from "@/lib/sketchCadTypes";
 import type { AlignAxis, AlignHandleStatus, AlignTarget, GridSize, ProjectAsset, ShapeAsset, SketchImage, SketchOperation, SketchPoint, SketchProfile, SketchRevolveSettings, SketchSegment, WorkplaneShape, WorkplaneWorkspaceSettings } from "@/types/sketchforge";
 
-export { importedShapeFromStl, importedShapeFromSvg };
+export { importedShapeFromObj, importedShapeFromStl, importedShapeFromSvg };
 
 type TopPanel = "import" | "export" | "profile" | "settings" | null;
 type ExportFormat = "stl" | "obj" | "step" | "svg" | "skf";
@@ -2640,6 +2642,40 @@ function shapeAabb(shape: WorkplaneShape): Cuboid {
 function boundsForShapes(shapes: WorkplaneShape[]): Cuboid {
   const bounds = shapes.map(meshAabb);
   return boundsForCuboids(bounds);
+}
+
+function selectionCenterOnWorkplane(shapes: WorkplaneShape[], workplane: PlacementWorkplane) {
+  const xAxis = new THREE.Vector3(workplane.xAxis.x, workplane.xAxis.y, workplane.xAxis.z).normalize();
+  const yAxis = new THREE.Vector3(workplane.normal.x, workplane.normal.y, workplane.normal.z).normalize();
+  const zAxis = new THREE.Vector3(workplane.zAxis.x, workplane.zAxis.y, workplane.zAxis.z).normalize();
+  const min = new THREE.Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
+  const max = new THREE.Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
+
+  shapes.forEach((shape) => {
+    meshForShape(shape).vertices.forEach(([x, y, z]) => {
+      const point = new THREE.Vector3(x, y, z);
+      min.x = Math.min(min.x, point.dot(xAxis));
+      min.y = Math.min(min.y, point.dot(yAxis));
+      min.z = Math.min(min.z, point.dot(zAxis));
+      max.x = Math.max(max.x, point.dot(xAxis));
+      max.y = Math.max(max.y, point.dot(yAxis));
+      max.z = Math.max(max.z, point.dot(zAxis));
+    });
+  });
+
+  if ([min.x, min.y, min.z, max.x, max.y, max.z].every(Number.isFinite)) {
+    return new THREE.Vector3()
+      .addScaledVector(xAxis, (min.x + max.x) / 2)
+      .addScaledVector(yAxis, (min.y + max.y) / 2)
+      .addScaledVector(zAxis, (min.z + max.z) / 2);
+  }
+
+  const bounds = boundsForShapes(shapes);
+  return new THREE.Vector3(
+    (bounds.minX + bounds.maxX) / 2,
+    (bounds.minY + bounds.maxY) / 2,
+    (bounds.minZ + bounds.maxZ) / 2,
+  );
 }
 
 function boundsForCuboids(bounds: Cuboid[]): Cuboid {
@@ -8461,7 +8497,7 @@ export function SketchForgeEditor({
     const projectFiles = files.filter((file) => /\.skf$/i.test(file.name));
     if (projectFiles.length) {
       if (files.length !== 1) {
-        setNotice("Open one .skf project at a time; import STL, STEP, and SVG geometry separately");
+        setNotice("Open one .skf project at a time; import STL, OBJ, STEP, and SVG geometry separately");
         return;
       }
       if (!onOpenSkfProjectFile) {
@@ -8488,8 +8524,9 @@ export function SketchForgeEditor({
 
       const sourceFormat = sourceFormatForFileName(file.name) ?? (file.type === "image/svg+xml" ? "svg" : null);
       const isStep = sourceFormat === "step";
+      const isObj = sourceFormat === "obj";
       const isSvg = sourceFormat === "svg";
-      if (!sourceFormat || sourceFormat === "obj" || (!isStep && !isSvg && !importExtensionSupported(file.name))) {
+      if (!sourceFormat || (!isStep && !isSvg && !importExtensionSupported(file.name))) {
         failures.push({ fileName: file.name, reason: "Unsupported file type" });
         continue;
       }
@@ -8502,6 +8539,8 @@ export function SketchForgeEditor({
         if (isStep) {
           const { importedShapeFromStep } = await import("@/lib/stepImport");
           nextShape = await importedShapeFromStep(file.name, buffer);
+        } else if (isObj) {
+          nextShape = importedShapeFromObj(file.name, new TextDecoder().decode(bytes));
         } else if (isSvg) {
           nextShape = importedShapeFromSvg(file.name, new TextDecoder().decode(bytes));
         } else {
@@ -8603,6 +8642,61 @@ export function SketchForgeEditor({
     },
     [commitShapes, hasSelection, placementWorkplane, selectedIds, selectedShapes.length, shapes],
   );
+
+  const rotateSelected45 = useCallback(() => {
+    if (!hasSelection) {
+      return;
+    }
+
+    const selected = new Set(selectedIds);
+    const rotatableShapes = selectedShapes.filter((shape) => !shape.locked);
+    if (rotatableShapes.length === 0) {
+      setNotice("Selection is locked");
+      return;
+    }
+
+    const axis = new THREE.Vector3(
+      placementWorkplane.normal.x,
+      placementWorkplane.normal.y,
+      placementWorkplane.normal.z,
+    );
+    if (axis.lengthSq() < 0.000001) {
+      axis.set(0, 1, 0);
+    } else {
+      axis.normalize();
+    }
+    const rotationDelta = new THREE.Quaternion().setFromAxisAngle(axis, THREE.MathUtils.degToRad(45));
+    const pivot = rotatableShapes.length > 1 ? selectionCenterOnWorkplane(rotatableShapes, placementWorkplane) : null;
+
+    const nextShapes = shapes.map((shape) => {
+      if (!selected.has(shape.id) || shape.locked) {
+        return shape;
+      }
+
+      const nextQuaternion = rotationDelta.clone().multiply(quaternionForShape(shape));
+      const rotationPatch = rotationFromQuaternion(nextQuaternion);
+      let rotated = canonicalizeShape({ ...shape, ...rotationPatch });
+
+      if (pivot) {
+        const startCenter = new THREE.Vector3(shape.x, (shape.elevation ?? 0) + shape.height / 2, shape.z);
+        const nextCenter = pivot.clone().add(startCenter.sub(pivot).applyQuaternion(rotationDelta));
+        rotated = canonicalizeShape({
+          ...rotated,
+          x: cleanNearZero(nextCenter.x, 0.0005),
+          z: cleanNearZero(nextCenter.z, 0.0005),
+          elevation: cleanNearZero(nextCenter.y - shape.height / 2, 0.0005),
+        });
+      }
+
+      return canonicalizeShape(bakeShapeTransformIntoMesh(rotated));
+    });
+
+    commitShapes(
+      nextShapes,
+      selectedIds,
+      `Rotated ${rotatableShapes.length} shape${rotatableShapes.length === 1 ? "" : "s"} by 45°`,
+    );
+  }, [commitShapes, hasSelection, placementWorkplane, selectedIds, selectedShapes, shapes]);
 
   useEffect(() => {
     const isTypingTarget = (target: EventTarget | null) => {
@@ -8727,6 +8821,12 @@ export function SketchForgeEditor({
         return;
       }
 
+      if (!shortcut && !event.altKey && key === "r" && hasSelection) {
+        event.preventDefault();
+        rotateSelected45();
+        return;
+      }
+
       const step = event.shiftKey ? 5 : 1;
       if (shortcut && event.key === "ArrowUp") {
         event.preventDefault();
@@ -8781,6 +8881,7 @@ export function SketchForgeEditor({
     pasteShape,
     raiseSelected,
     redo,
+    rotateSelected45,
     sketchActive,
     sketchRedo,
     sketchMeasurement,
@@ -9051,7 +9152,7 @@ export function SketchForgeEditor({
         className="hidden-file-input"
         type="file"
         multiple
-        accept=".stl,.step,.stp,.svg,image/svg+xml"
+        accept=".stl,.obj,.step,.stp,.svg,image/svg+xml"
         onChange={(event) => {
           if (event.currentTarget.files) {
             selectFiles(event.currentTarget.files);
@@ -9788,7 +9889,7 @@ function TopActionPanel({
             }}
           >
             <ToolbarImportIcon />
-            <strong>Drop STL, STEP, or SVG files</strong>
+            <strong>Drop STL, OBJ, STEP, or SVG files</strong>
             <span>or click to choose from your computer</span>
           </button>
         </div>
