@@ -46,6 +46,7 @@ mac:
   artifactName: ${productName}-${version}-${arch}.${ext}
 
 linux:
+  syncDesktopName: true
   icon: apps/web/public/assets/sketchforge/sketchforge-logo.png
   target:
     - AppImage
