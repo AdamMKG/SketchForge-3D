@@ -42,10 +42,13 @@ runs:
         APPLE_API_ISSUER: ${{ inputs.apple-api-issuer }}
       run: |
         suffix=""
+        signing_enabled=true
         if [[ -z "$CSC_LINK" || -z "$CSC_KEY_PASSWORD" || -z "$APPLE_API_KEY" || -z "$APPLE_API_KEY_ID" || -z "$APPLE_API_ISSUER" ]]; then
           suffix="-unsigned"
+          signing_enabled=false
         fi
         echo "artifact_suffix=$suffix" >> "$GITHUB_OUTPUT"
+        echo "signing_enabled=$signing_enabled" >> "$GITHUB_OUTPUT"
 
     - name: Build macOS package
       shell: bash
@@ -55,6 +58,7 @@ runs:
         APPLE_API_KEY: ${{ inputs.apple-api-key }}
         APPLE_API_KEY_ID: ${{ inputs.apple-api-key-id }}
         APPLE_API_ISSUER: ${{ inputs.apple-api-issuer }}
+        CSC_IDENTITY_AUTO_DISCOVERY: ${{ steps.signing.outputs.signing_enabled }}
       run: |
         npm run desktop:dist -- --publish never --mac --${{ inputs.arch }} \
           "-c.mac.artifactName=\${productName}-\${version}-\${arch}${{ steps.signing.outputs.artifact_suffix }}.\${ext}"
