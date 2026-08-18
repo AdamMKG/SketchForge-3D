@@ -68,10 +68,14 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Set package version
+        id: package
         shell: bash
         env:
           VERSION: ${{ steps.version.outputs.version }}
-        run: npm version "$VERSION" --no-git-tag-version --allow-same-version
+        run: |
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+          version=$(node -p "require('./package.json').version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Install dependencies
         run: npm ci
@@ -89,7 +93,7 @@ jobs:
         if: matrix.platform == 'windows'
         shell: pwsh
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ steps.package.outputs.version }}
         run: |
           $required = @(
             "dist/desktop/SketchForge-Setup-$env:VERSION-x64.exe",
@@ -106,7 +110,7 @@ jobs:
         if: matrix.platform == 'linux'
         shell: bash
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ steps.package.outputs.version }}
         run: |
           test -f "dist/desktop/SketchForge-$VERSION-x86_64.AppImage"
           test -f dist/desktop/latest-linux.yml
@@ -167,6 +171,16 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
+      - name: Normalize package version
+        id: package
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+          version=$(node -p "require('./package.json').version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - name: Ensure release tag exists
         if: github.event_name == 'workflow_dispatch'
         env:
@@ -223,7 +237,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.version.outputs.tag }}
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ steps.package.outputs.version }}
         run: |
           assets=$(gh release view "$TAG" --json isDraft,assets)
           test "$(jq -r '.isDraft' <<< "$assets")" = "true"
