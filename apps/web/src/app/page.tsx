@@ -16,7 +16,7 @@ import {
   type PlacementWorkplane,
 } from "@/lib/placementWorkplane";
 import { attachProjectAsset, dedupeProjectAssets, projectAssetFromBytes, sourceFormatForFileName } from "@/lib/projectAssets";
-import { hydrateProjectShapeState, type ImportedMeshResource } from "@/lib/projectShapePersistence";
+import { hydrateProjectShapeState, reconcileLoadedProjectShapeCacheEntry, type ImportedMeshResource } from "@/lib/projectShapePersistence";
 import { exportSkfProject, importSkfProject, SKF_CREATED_WITH_VERSION } from "@/lib/skfProject";
 import { importExtensionSupported } from "@/lib/importExtensions";
 import { DEFAULT_SNAP_GRID, DEFAULT_WORKPLANE_WORKSPACE, normalizeSnapGrid, normalizeWorkspaceSettings, workplaneSettingsFingerprint } from "@/lib/workplaneSettings";
@@ -659,14 +659,27 @@ export default function Home() {
     void loadProjectShapes(activeProjectId)
       .then((record) => {
         if (canceled) return;
-        const revision = activeProject.revision ?? record?.revision ?? Date.now();
-        const entry = projectShapeCacheEntry(revision, record?.shapes ?? [], record?.history, record?.historyIndex, record?.assets);
-        setProjectShapesById((current) => ({
-          ...current,
-          [activeProjectId]: entry,
-        }));
-        if (record && !record.skfPackage) {
-          void saveProjectShapesWhenIdle(activeProjectId, entry, projectShapeSaveContext(activeProject)).catch(() => {
+        const loadedRevision = record?.revision ?? 0;
+        const revision = Math.max(activeProject.revision ?? 0, loadedRevision, 1);
+        const loadedEntry = projectShapeCacheEntry(Math.max(loadedRevision, 1), record?.shapes ?? [], record?.history, record?.historyIndex, record?.assets);
+        const entry = loadedEntry.revision === revision ? loadedEntry : { ...loadedEntry, revision };
+        setProjectShapesById((current) => {
+          // IndexedDB reads are asynchronous. A local edit/import can update the live
+          // cache while this older read is still in flight; never let that stale read
+          // replace newer in-memory shapes. Bump the preserved entry to the requested
+          // project revision so this effect does not immediately retry the same load.
+          const existing = current[activeProjectId];
+          const reconciled = reconcileLoadedProjectShapeCacheEntry(existing, entry, loadedRevision);
+          if (reconciled === existing) return current;
+          return {
+            ...current,
+            [activeProjectId]: reconciled,
+          };
+        });
+        if (record && !record.skfPackage && loadedRevision > 0) {
+          // Migrate the data at the revision it was actually read from disk. Using the
+          // newer project metadata revision here can let stale shapes outrank a live edit.
+          void saveProjectShapesWhenIdle(activeProjectId, loadedEntry, projectShapeSaveContext(activeProject)).catch(() => {
             // The legacy record remains readable and migration can retry on the next load.
           });
         }
@@ -674,10 +687,15 @@ export default function Home() {
       .catch((error) => {
         if (!canceled) {
           setDashboardNotice(error instanceof Error ? error.message : "Could not load project shapes");
-          setProjectShapesById((current) => ({
-            ...current,
-            [activeProjectId]: projectShapeCacheEntry(activeProject.revision ?? Date.now(), []),
-          }));
+          setProjectShapesById((current) => {
+            // A failed background read must not erase a project that has already
+            // received live editor changes while the read was pending.
+            if (current[activeProjectId]) return current;
+            return {
+              ...current,
+              [activeProjectId]: projectShapeCacheEntry(activeProject.revision ?? Date.now(), []),
+            };
+          });
         }
       });
     return () => {
