@@ -1,4 +1,5 @@
 name: Desktop Release
+run-name: Desktop Release ${{ inputs.version || github.ref_name }}
 
 on:
   push:
