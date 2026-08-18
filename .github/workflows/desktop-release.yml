@@ -33,8 +33,13 @@ jobs:
             runner: ubuntu-latest
             artifact: desktop-linux
           - platform: macos
-            runner: macos-latest
-            artifact: desktop-macos
+            runner: macos-15-intel
+            artifact: desktop-macos-x64
+            arch: x64
+          - platform: macos
+            runner: macos-14
+            artifact: desktop-macos-arm64
+            arch: arm64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     steps:
@@ -95,6 +100,7 @@ jobs:
         with:
           version: ${{ steps.package.outputs.version }}
           artifact-name: ${{ matrix.artifact }}
+          arch: ${{ matrix.arch }}
           csc-link: ${{ secrets.CSC_LINK }}
           csc-key-password: ${{ secrets.CSC_KEY_PASSWORD }}
           apple-api-key: ${{ secrets.APPLE_API_KEY }}
@@ -184,11 +190,45 @@ jobs:
           name: desktop-linux
           path: dist/release
 
-      - name: Download macOS artifacts
+      - name: Download macOS x64 artifacts
         uses: actions/download-artifact@v4
         with:
-          name: desktop-macos
-          path: dist/release
+          name: desktop-macos-x64
+          path: dist/release/macos-x64
+
+      - name: Download macOS arm64 artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: desktop-macos-arm64
+          path: dist/release/macos-arm64
+
+      - name: Merge macOS update manifests
+        shell: bash
+        run: |
+          npm ci --ignore-scripts
+          node <<'NODE'
+          const fs = require("node:fs");
+          const yaml = require("js-yaml");
+          const paths = [
+            "dist/release/macos-x64/latest-mac-x64.yml",
+            "dist/release/macos-arm64/latest-mac-arm64.yml",
+          ];
+          const manifests = paths.map((file) => yaml.load(fs.readFileSync(file, "utf8")));
+          const merged = {
+            ...manifests[0],
+            files: manifests.flatMap((manifest) => manifest.files || []),
+          };
+          delete merged.path;
+          delete merged.sha512;
+          fs.writeFileSync("dist/release/latest-mac.yml", yaml.dump(merged, { noRefs: true }));
+          for (const directory of ["macos-x64", "macos-arm64"]) {
+            for (const file of fs.readdirSync(`dist/release/${directory}`)) {
+              if (file === "latest-mac-x64.yml" || file === "latest-mac-arm64.yml") continue;
+              fs.renameSync(`dist/release/${directory}/${file}`, `dist/release/${file}`);
+            }
+            fs.rmSync(`dist/release/${directory}`, { recursive: true, force: true });
+          }
+          NODE
 
       - name: Create draft release
         env:
@@ -240,8 +280,10 @@ jobs:
             "latest.yml" \
             "SketchForge-$VERSION-x86_64.AppImage" \
             "latest-linux.yml" \
-            "SketchForge-$VERSION-universal${suffix}.dmg" \
-            "SketchForge-$VERSION-universal${suffix}.zip" \
+            "SketchForge-$VERSION-x64${suffix}.dmg" \
+            "SketchForge-$VERSION-x64${suffix}.zip" \
+            "SketchForge-$VERSION-arm64${suffix}.dmg" \
+            "SketchForge-$VERSION-arm64${suffix}.zip" \
             "latest-mac.yml"; do
             grep -Fxq "$expected" <<< "$names" || {
               echo "GitHub release is missing $expected" >&2

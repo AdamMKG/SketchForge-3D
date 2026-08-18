@@ -9,6 +9,9 @@ inputs:
   artifact-name:
     description: GitHub Actions artifact name.
     required: true
+  arch:
+    description: macOS architecture.
+    required: true
   csc-link:
     description: Developer ID Application certificate.
     required: false
@@ -53,7 +56,7 @@ runs:
         APPLE_API_KEY_ID: ${{ inputs.apple-api-key-id }}
         APPLE_API_ISSUER: ${{ inputs.apple-api-issuer }}
       run: |
-        npm run desktop:dist -- --publish never --mac --universal \
+        npm run desktop:dist -- --publish never --mac --${{ inputs.arch }} \
           "-c.mac.artifactName=\${productName}-\${version}-\${arch}${{ steps.signing.outputs.artifact_suffix }}.\${ext}"
 
     - name: Verify macOS artifacts
@@ -62,16 +65,20 @@ runs:
         VERSION: ${{ inputs.version }}
       run: |
         suffix="${{ steps.signing.outputs.artifact_suffix }}"
-        test -f "dist/desktop/SketchForge-$VERSION-universal${suffix}.dmg"
-        test -f "dist/desktop/SketchForge-$VERSION-universal${suffix}.zip"
+        test -f "dist/desktop/SketchForge-$VERSION-${{ inputs.arch }}${suffix}.dmg"
+        test -f "dist/desktop/SketchForge-$VERSION-${{ inputs.arch }}${suffix}.zip"
         test -f dist/desktop/latest-mac.yml
+
+    - name: Rename macOS update manifest
+      shell: bash
+      run: mv dist/desktop/latest-mac.yml "dist/desktop/latest-mac-${{ inputs.arch }}.yml"
 
     - name: Store macOS artifacts
       uses: actions/upload-artifact@v4
       with:
         name: ${{ inputs.artifact-name }}
         path: |
-          dist/desktop/SketchForge-*-universal*.dmg
-          dist/desktop/SketchForge-*-universal*.zip
-          dist/desktop/latest-mac.yml
+          dist/desktop/SketchForge-*-${{ inputs.arch }}*.dmg
+          dist/desktop/SketchForge-*-${{ inputs.arch }}*.zip
+          dist/desktop/latest-mac-${{ inputs.arch }}.yml
         if-no-files-found: error

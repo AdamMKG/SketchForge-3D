@@ -38,10 +38,10 @@ The workflow builds these packages:
 
 - Windows NSIS installer
 - Linux AppImage
-- macOS universal DMG
-- macOS universal ZIP
+- macOS x64 DMG and ZIP
+- macOS arm64 DMG and ZIP
 
-The macOS ZIP and `latest-mac.yml` file are required by `electron-updater`.
+The macOS ZIP files and merged `latest-mac.yml` file are required by `electron-updater`.
 
 ## macOS signing and notarization
 
@@ -56,15 +56,19 @@ The macOS job reads these repository secrets:
 When all signing and Apple notarization variables are present, the macOS artifacts use their normal names:
 
 ```text
-SketchForge-VERSION-universal.dmg
-SketchForge-VERSION-universal.zip
+SketchForge-VERSION-x64.dmg
+SketchForge-VERSION-x64.zip
+SketchForge-VERSION-arm64.dmg
+SketchForge-VERSION-arm64.zip
 ```
 
 When one or more signing or Apple notarization variables are missing, the workflow marks the packages as unsigned:
 
 ```text
-SketchForge-VERSION-universal-unsigned.dmg
-SketchForge-VERSION-universal-unsigned.zip
+SketchForge-VERSION-x64-unsigned.dmg
+SketchForge-VERSION-x64-unsigned.zip
+SketchForge-VERSION-arm64-unsigned.dmg
+SketchForge-VERSION-arm64-unsigned.zip
 ```
 
 Unsigned packages trigger a Gatekeeper warning. Add the signing and notarization secrets before public distribution.
