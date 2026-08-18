@@ -83,7 +83,7 @@ jobs:
         run: npm test
 
       - name: Build desktop package
-        run: npm run desktop:dist
+        run: npm run desktop:dist -- --publish never
 
       - name: Verify Windows artifacts
         if: matrix.platform == 'windows'
