@@ -31,6 +31,9 @@ jobs:
           - platform: linux
             runner: ubuntu-latest
             artifact: desktop-linux
+          - platform: macos
+            runner: macos-latest
+            artifact: desktop-macos
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     steps:
@@ -86,55 +89,28 @@ jobs:
       - name: Run tests
         run: npm test
 
-      - name: Build desktop package
-        run: npm run desktop:dist -- --publish never
-
-      - name: Verify Windows artifacts
-        if: matrix.platform == 'windows'
-        shell: pwsh
-        env:
-          VERSION: ${{ steps.package.outputs.version }}
-        run: |
-          $required = @(
-            "dist/desktop/SketchForge-Setup-$env:VERSION-x64.exe",
-            "dist/desktop/SketchForge-Setup-$env:VERSION-x64.exe.blockmap",
-            "dist/desktop/latest.yml"
-          )
-          foreach ($file in $required) {
-            if (-not (Test-Path $file -PathType Leaf)) {
-              throw "Missing Windows artifact: $file"
-            }
-          }
-
-      - name: Verify Linux artifacts
-        if: matrix.platform == 'linux'
-        shell: bash
-        env:
-          VERSION: ${{ steps.package.outputs.version }}
-        run: |
-          test -f "dist/desktop/SketchForge-$VERSION-x86_64.AppImage"
-          test -f dist/desktop/latest-linux.yml
-
-      - name: Store Windows artifacts
-        if: matrix.platform == 'windows'
-        uses: actions/upload-artifact@v4
+      - uses: ./.github/actions/build-mac
+        if: matrix.platform == 'macos'
         with:
-          name: ${{ matrix.artifact }}
-          path: |
-            dist/desktop/SketchForge-Setup-*-x64.exe
-            dist/desktop/SketchForge-Setup-*-x64.exe.blockmap
-            dist/desktop/latest.yml
-          if-no-files-found: error
+          version: ${{ steps.package.outputs.version }}
+          artifact-name: ${{ matrix.artifact }}
+          csc-link: ${{ secrets.CSC_LINK }}
+          csc-key-password: ${{ secrets.CSC_KEY_PASSWORD }}
+          apple-api-key: ${{ secrets.APPLE_API_KEY }}
+          apple-api-key-id: ${{ secrets.APPLE_API_KEY_ID }}
+          apple-api-issuer: ${{ secrets.APPLE_API_ISSUER }}
 
-      - name: Store Linux artifacts
+      - uses: ./.github/actions/build-linux
         if: matrix.platform == 'linux'
-        uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: |
-            dist/desktop/SketchForge-*.AppImage
-            dist/desktop/latest-linux.yml
-          if-no-files-found: error
+          version: ${{ steps.package.outputs.version }}
+          artifact-name: ${{ matrix.artifact }}
+
+      - uses: ./.github/actions/build-win32
+        if: matrix.platform == 'windows'
+        with:
+          version: ${{ steps.package.outputs.version }}
+          artifact-name: ${{ matrix.artifact }}
 
   attach:
     name: Attach packages to release
@@ -207,6 +183,12 @@ jobs:
           name: desktop-linux
           path: dist/release
 
+      - name: Download macOS artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: desktop-macos
+          path: dist/release
+
       - name: Create draft release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -238,16 +220,28 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.version.outputs.tag }}
           VERSION: ${{ steps.package.outputs.version }}
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
         run: |
           assets=$(gh release view "$TAG" --json isDraft,assets)
           test "$(jq -r '.isDraft' <<< "$assets")" = "true"
           names=$(jq -r '.assets[].name' <<< "$assets")
+          suffix=""
+          if [[ -z "$CSC_LINK" || -z "$CSC_KEY_PASSWORD" || -z "$APPLE_API_KEY" || -z "$APPLE_API_KEY_ID" || -z "$APPLE_API_ISSUER" ]]; then
+            suffix="-unsigned"
+          fi
           for expected in \
             "SketchForge-Setup-$VERSION-x64.exe" \
             "SketchForge-Setup-$VERSION-x64.exe.blockmap" \
             "latest.yml" \
             "SketchForge-$VERSION-x86_64.AppImage" \
-            "latest-linux.yml"; do
+            "latest-linux.yml" \
+            "SketchForge-$VERSION-universal${suffix}.dmg" \
+            "SketchForge-$VERSION-universal${suffix}.zip" \
+            "latest-mac.yml"; do
             grep -Fxq "$expected" <<< "$names" || {
               echo "GitHub release is missing $expected" >&2
               exit 1

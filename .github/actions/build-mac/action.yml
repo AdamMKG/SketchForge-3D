@@ -1,0 +1,77 @@
+name: Build macOS desktop
+
+description: Build and store the macOS desktop package.
+
+inputs:
+  version:
+    description: Package version.
+    required: true
+  artifact-name:
+    description: GitHub Actions artifact name.
+    required: true
+  csc-link:
+    description: Developer ID Application certificate.
+    required: false
+  csc-key-password:
+    description: Developer ID Application certificate password.
+    required: false
+  apple-api-key:
+    description: App Store Connect API private key path.
+    required: false
+  apple-api-key-id:
+    description: App Store Connect API key ID.
+    required: false
+  apple-api-issuer:
+    description: App Store Connect API issuer ID.
+    required: false
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve macOS signing state
+      id: signing
+      shell: bash
+      env:
+        CSC_LINK: ${{ inputs.csc-link }}
+        CSC_KEY_PASSWORD: ${{ inputs.csc-key-password }}
+        APPLE_API_KEY: ${{ inputs.apple-api-key }}
+        APPLE_API_KEY_ID: ${{ inputs.apple-api-key-id }}
+        APPLE_API_ISSUER: ${{ inputs.apple-api-issuer }}
+      run: |
+        suffix=""
+        if [[ -z "$CSC_LINK" || -z "$CSC_KEY_PASSWORD" || -z "$APPLE_API_KEY" || -z "$APPLE_API_KEY_ID" || -z "$APPLE_API_ISSUER" ]]; then
+          suffix="-unsigned"
+        fi
+        echo "artifact_suffix=$suffix" >> "$GITHUB_OUTPUT"
+
+    - name: Build macOS package
+      shell: bash
+      env:
+        CSC_LINK: ${{ inputs.csc-link }}
+        CSC_KEY_PASSWORD: ${{ inputs.csc-key-password }}
+        APPLE_API_KEY: ${{ inputs.apple-api-key }}
+        APPLE_API_KEY_ID: ${{ inputs.apple-api-key-id }}
+        APPLE_API_ISSUER: ${{ inputs.apple-api-issuer }}
+      run: |
+        npm run desktop:dist -- --publish never --mac --universal \
+          "-c.mac.artifactName=\${productName}-\${version}-\${arch}${{ steps.signing.outputs.artifact_suffix }}.\${ext}"
+
+    - name: Verify macOS artifacts
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+      run: |
+        suffix="${{ steps.signing.outputs.artifact_suffix }}"
+        test -f "dist/desktop/SketchForge-$VERSION-universal${suffix}.dmg"
+        test -f "dist/desktop/SketchForge-$VERSION-universal${suffix}.zip"
+        test -f dist/desktop/latest-mac.yml
+
+    - name: Store macOS artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: |
+          dist/desktop/SketchForge-*-universal*.dmg
+          dist/desktop/SketchForge-*-universal*.zip
+          dist/desktop/latest-mac.yml
+        if-no-files-found: error
