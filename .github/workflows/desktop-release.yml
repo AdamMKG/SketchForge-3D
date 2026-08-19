@@ -172,7 +172,12 @@ jobs:
         run: |
           git fetch --tags --force
           if git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "$TAG already exists."
+            tag_sha=$(git rev-list -n 1 "$TAG")
+            source_sha=$(git rev-parse "$SOURCE_SHA^{commit}")
+            if [[ "$tag_sha" != "$source_sha" ]]; then
+              echo "$TAG already points to $tag_sha instead of $source_sha." >&2
+              exit 1
+            fi
           else
             git tag "$TAG" "$SOURCE_SHA"
             git push origin "$TAG"
@@ -213,14 +218,24 @@ jobs:
             "dist/release/macos-x64/latest-mac-x64.yml",
             "dist/release/macos-arm64/latest-mac-arm64.yml",
           ];
-          const manifests = paths.map((file) => yaml.load(fs.readFileSync(file, "utf8")));
-          const merged = {
-            ...manifests[0],
-            files: manifests.flatMap((manifest) => manifest.files || []),
-          };
-          delete merged.path;
-          delete merged.sha512;
-          fs.writeFileSync("dist/release/latest-mac.yml", yaml.dump(merged, { noRefs: true }));
+          const existingPaths = paths.filter((file) => fs.existsSync(file));
+          if (existingPaths.length === 1) {
+            throw new Error("Only one macOS architecture produced an updater manifest.");
+          }
+          if (existingPaths.length === 2) {
+            const manifests = existingPaths.map((file) => yaml.load(fs.readFileSync(file, "utf8")));
+            const versions = new Set(manifests.map((manifest) => manifest.version));
+            if (versions.size !== 1) {
+              throw new Error("macOS updater manifests have different versions.");
+            }
+            const merged = {
+              ...manifests[0],
+              files: manifests.flatMap((manifest) => manifest.files || []),
+            };
+            delete merged.path;
+            delete merged.sha512;
+            fs.writeFileSync("dist/release/latest-mac.yml", yaml.dump(merged, { noRefs: true }));
+          }
           for (const directory of ["macos-x64", "macos-arm64"]) {
             for (const file of fs.readdirSync(`dist/release/${directory}`)) {
               if (file === "latest-mac-x64.yml" || file === "latest-mac-arm64.yml") continue;
@@ -254,7 +269,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.version.outputs.tag }}
-        run: gh release upload "$TAG" dist/release/* --clobber
+        run: |
+          while IFS= read -r asset; do
+            case "$asset" in
+              SketchForge-*|latest.yml|latest-linux.yml|latest-mac.yml)
+                gh release delete-asset "$TAG" "$asset" --yes
+                ;;
+            esac
+          done < <(gh release view "$TAG" --json assets --jq '.assets[].name')
+          gh release upload "$TAG" dist/release/*
 
       - name: Verify release assets
         env:
@@ -283,13 +306,21 @@ jobs:
             "SketchForge-$VERSION-x64${suffix}.dmg" \
             "SketchForge-$VERSION-x64${suffix}.zip" \
             "SketchForge-$VERSION-arm64${suffix}.dmg" \
-            "SketchForge-$VERSION-arm64${suffix}.zip" \
-            "latest-mac.yml"; do
+            "SketchForge-$VERSION-arm64${suffix}.zip"; do
             grep -Fxq "$expected" <<< "$names" || {
               echo "GitHub release is missing $expected" >&2
               exit 1
             }
           done
+          if [[ -z "$suffix" ]]; then
+            grep -Fxq "latest-mac.yml" <<< "$names" || {
+              echo "GitHub release is missing latest-mac.yml" >&2
+              exit 1
+            }
+          elif grep -Fxq "latest-mac.yml" <<< "$names"; then
+            echo "Unsigned macOS builds must not publish latest-mac.yml" >&2
+            exit 1
+          fi
 
       - name: Publish release as latest
         env:

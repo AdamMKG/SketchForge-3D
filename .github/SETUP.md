@@ -49,7 +49,7 @@ The macOS job reads these repository secrets:
 
 - `CSC_LINK`: base64-encoded Developer ID Application certificate
 - `CSC_KEY_PASSWORD`: certificate password
-- `APPLE_API_KEY`: App Store Connect API private key path
+- `APPLE_API_KEY`: App Store Connect API private key contents or base64-encoded contents
 - `APPLE_API_KEY_ID`: App Store Connect API key ID
 - `APPLE_API_ISSUER`: App Store Connect API issuer ID
 
