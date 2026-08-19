@@ -42,10 +42,12 @@ mac:
   icon: apps/web/public/assets/sketchforge/sketchforge-logo.png
   target:
     - dmg
+    - zip
   category: public.app-category.graphics-design
   artifactName: ${productName}-${version}-${arch}.${ext}
 
 linux:
+  syncDesktopName: true
   icon: apps/web/public/assets/sketchforge/sketchforge-logo.png
   target:
     - AppImage

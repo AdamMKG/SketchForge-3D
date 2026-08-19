@@ -2,6 +2,12 @@
   "name": "sketchforge",
   "version": "1.0.4",
   "private": true,
+  "description": "A local-first 3D design editor.",
+  "author": {
+    "name": "SketchForge contributors"
+  },
+  "homepage": "https://sketchforge3d.com",
+  "desktopName": "sketchforge",
   "main": "apps/desktop/main.cjs",
   "license": "AGPL-3.0-only",
   "scripts": {
@@ -55,6 +61,7 @@
     "@types/react-dom": "^19.1.5",
     "electron": "^43.4.0",
     "electron-builder": "^26.15.3",
+    "js-yaml": "^4.3.1",
     "typescript": "^5.8.3",
     "vitest": "^4.1.8"
   }

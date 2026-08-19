@@ -65,6 +65,35 @@ There are two common ways to run SketchForge. If you are not sure which one to c
 
 SketchForge is local-first in both modes. The app files may be served from a computer or server, but projects stay in each user's browser storage. STL and OBJ exports download through the user's browser. SketchForge does not upload models to a SketchForge cloud service.
 
+## macOS Desktop Release
+
+GitHub releases include macOS DMG files for Intel (`x64`) and Apple Silicon (`arm64`) Macs. Choose the file that matches your Mac.
+
+1. Open the downloaded DMG file.
+2. Drag `SketchForge.app` to the `Applications` folder.
+3. Eject the DMG file.
+4. Control-click `SketchForge.app` in `Applications`.
+5. Select **Open**, then select **Open** again.
+
+Unsigned releases have `-unsigned` in the file name. macOS shows a Gatekeeper warning for these releases. If macOS does not show the **Open** option, run this command in Terminal:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/SketchForge.app
+open /Applications/SketchForge.app
+```
+
+Do not open the app from Safari's Downloads folder or directly from the mounted DMG. Copy it to `Applications` first.
+
+### macOS Virtual Machines
+
+Some macOS virtual machines do not provide hardware WebGL. Launch SketchForge with software WebGL in that case:
+
+```bash
+/Applications/SketchForge.app/Contents/MacOS/SketchForge \
+  --use-angle=swiftshader \
+  --enable-unsafe-swiftshader
+```
+
 ### Download the Project
 
 If you already know Git:
