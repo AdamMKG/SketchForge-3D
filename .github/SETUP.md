@@ -32,7 +32,7 @@ permissions:
 
 ## Create a release
 
-Push a tag such as `v1.0.5`, or run `Desktop Release` with `workflow_dispatch` and enter `1.0.5`.
+Push a tag such as `v1.0.6`, or run `Desktop Release` with `workflow_dispatch` and enter `1.0.6`.
 
 The workflow builds these packages:
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.6
+
+- Fixed dense STL imports failing with `Invalid string length` while creating their initial undo-history fingerprint.
+- Streamed large numeric mesh arrays into deterministic hashes instead of converting millions of coordinates to one oversized JSON string.
+
 ## 1.0.5
 
 - Made the rotation handles larger and aligned their arrow glyphs with the model faces as the camera moves, including stable behavior on long objects.

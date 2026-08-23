@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { appendEditorHistorySnapshot, boundedEditorHistory, editorHistoryEntry, editorHistoryForExport, hydrateEditorHistoryState, projectShapesFingerprint } from "@/lib/editorHistory";
+import { appendEditorHistorySnapshot, boundedEditorHistory, editorHistoryEntry, editorHistoryForExport, hydrateEditorHistoryState, immutableResourceFingerprint, projectShapesFingerprint } from "@/lib/editorHistory";
 import type { WorkplaneShape } from "@/types/sketchforge";
 
 function box(overrides: Partial<WorkplaneShape> = {}): WorkplaneShape {
@@ -91,6 +91,37 @@ describe("editor history snapshots", () => {
       ...shape,
       importedMesh: { ...shape.importedMesh!, positions: [...positions] },
     }])).toBe(baseline);
+  });
+
+  it("stream-hashes large mesh arrays and detects changes at the end", () => {
+    const positions = Array.from({ length: 10_001 }, (_, index) => Math.fround(Math.sin(index) * 100));
+    const resource = {
+      positions,
+      normals: positions.map((value) => Math.fround(value / 100)),
+      baseWidth: 200,
+      baseDepth: 150,
+      baseHeight: 80,
+      triangleCount: Math.floor(positions.length / 9),
+      sourceFormat: "stl",
+    };
+    const changedPositions = [...positions];
+    changedPositions[changedPositions.length - 1] += 1;
+
+    expect(immutableResourceFingerprint({ ...resource, positions: [...positions], normals: [...resource.normals] }))
+      .toBe(immutableResourceFingerprint(resource));
+    expect(immutableResourceFingerprint({ ...resource, positions: changedPositions }))
+      .not.toBe(immutableResourceFingerprint(resource));
+  });
+
+  it("falls back to direct field hashing when serialization exceeds the string limit", () => {
+    const resource = {
+      positions: [0, 0, 0, 1, 0, 0, 0, 1, 0],
+      toJSON() {
+        throw new RangeError("Invalid string length");
+      },
+    };
+
+    expect(immutableResourceFingerprint(resource)).toMatch(/^stream-v1:/);
   });
 
   it("keeps unlimited history and applies preset or custom action limits", () => {
