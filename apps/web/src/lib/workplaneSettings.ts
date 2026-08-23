@@ -15,6 +15,7 @@ export const DEFAULT_WORKPLANE_WORKSPACE: WorkplaneWorkspaceSettings = {
   showShadows: true,
   showGrid: true,
   cruiseShapes: true,
+  selectBeforeMove: false,
   zoomSpeed: 5,
   units: "Metric (Default)",
   scale: "1:1 (millimeters)",
@@ -68,12 +69,17 @@ export function normalizeWorkspaceSettings(value: unknown, fallback: WorkplaneWo
     showShadows: booleanOrDefault(candidate.showShadows, fallback.showShadows),
     showGrid: booleanOrDefault(candidate.showGrid, fallback.showGrid),
     cruiseShapes: booleanOrDefault(candidate.cruiseShapes, fallback.cruiseShapes),
+    selectBeforeMove: booleanOrDefault(candidate.selectBeforeMove, fallback.selectBeforeMove),
     zoomSpeed: numberOrDefault(candidate.zoomSpeed, fallback.zoomSpeed),
     units,
     scale: normalizeScaleForUnits(units, stringOrDefault(candidate.scale, fallback.scale)),
     accuracy: accuracyOrDefault(candidate.accuracy, fallback.accuracy),
     historyLimit: historyLimitOrDefault(candidate.historyLimit, fallback.historyLimit),
   };
+}
+
+export function canBeginShapeDrag(selectBeforeMove: boolean, alreadySelected: boolean) {
+  return !selectBeforeMove || alreadySelected;
 }
 
 export function workplaneSettingsFingerprint(workspace: WorkplaneWorkspaceSettings, snapGrid: GridSize) {

@@ -42,7 +42,7 @@ import {
   type PlacementWorkplane,
 } from "@/lib/placementWorkplane";
 import { regularPolygonFootprintScale } from "@/lib/regularPolygonFootprint";
-import { DEFAULT_SNAP_GRID, DEFAULT_WORKPLANE_WORKSPACE, normalizeSnapGrid, normalizeWorkspaceSettings, workplaneSettingsFingerprint, workspaceHydrationSyncDecision } from "@/lib/workplaneSettings";
+import { canBeginShapeDrag, DEFAULT_SNAP_GRID, DEFAULT_WORKPLANE_WORKSPACE, normalizeSnapGrid, normalizeWorkspaceSettings, workplaneSettingsFingerprint, workspaceHydrationSyncDecision } from "@/lib/workplaneSettings";
 import { interiorWorkplaneGridCoordinates, workplaneThemePalette, WORKPLANE_LINE_ELEVATION, WORKPLANE_MAJOR_GRID_INTERVAL } from "@/lib/workplaneGrid";
 import { cleanNearZero, cleanRotationDegrees, fallbackSolidColor, mirroredAxisCount, mirrorSign, preservesEdgeTreatmentSize, proportionalResizeScale, resizedImportedCoordinates, resizedImportedMeshPositions, resizedShapeSize, shapeDepth, shapeHasTaper, shapeOverallFootprintDimensions, shapeTaperDimensions, shapeTaperScaleAt, shapeWidth } from "@/lib/workplaneShapes";
 import { sphereTessellation } from "@/lib/sphereTessellation";
@@ -51,6 +51,7 @@ import {
   TransformOverlay,
   getElevationMeasureKey,
   measureKeyForHandle,
+  normalizedRotationPlaneBasis,
   type DimensionMark,
   type EditingDimension,
   type EditingRotation,
@@ -1837,8 +1838,6 @@ function signedAngleAroundAxis(start: THREE.Vector3, current: THREE.Vector3, axi
 
 const ROTATION_HANDLE_SIDE_HYSTERESIS = 0.22;
 const ROTATION_HANDLE_DOMINANCE_HYSTERESIS = 0.18;
-const ROTATION_UPPER_HANDLE_ICON_ANGLE = 0;
-const ROTATION_BOTTOM_HANDLE_ICON_ANGLE = 0;
 function signedRotationSide(value: number, previous: RotationHandleSide | undefined, positiveSide: RotationHandleSide, negativeSide: RotationHandleSide) {
   if (previous === positiveSide && value > -ROTATION_HANDLE_SIDE_HYSTERESIS) {
     return previous;
@@ -1896,9 +1895,10 @@ function rotationHandleSidesForCamera(
   const viewZ = viewZRaw / length;
   const previous = state.rotationHandleSides ?? undefined;
   const next: RotationHandleSides = {
-    x: signedRotationSide(viewX, previous?.x, "right", "left"),
+    // Keep the two upper rotation handles on the faces opposite the camera.
+    x: signedRotationSide(viewX, previous?.x, "left", "right"),
     y: dominantRotationSide(viewX, viewZ, previous?.y),
-    z: signedRotationSide(viewZ, previous?.z, "near", "far"),
+    z: signedRotationSide(viewZ, previous?.z, "far", "near"),
   };
   state.rotationHandleSides = next;
   return next;
@@ -4262,6 +4262,9 @@ export function WorkplaneViewport({
       if (!alreadySelected) {
         onSelectShape(id);
       }
+      if (!canBeginShapeDrag(workspaceRef.current.selectBeforeMove, alreadySelected)) {
+        return;
+      }
       if (shape.locked) {
         return;
       }
@@ -6231,7 +6234,10 @@ function updateTransformOverlayDom(state: ThreeState, next: TransformOverlayStat
     }
     element.style.setProperty("--overlay-x", `${handle.x}px`);
     element.style.setProperty("--overlay-y", `${handle.y}px`);
-    element.style.setProperty("--rotate-handle-angle", `${handle.angle}deg`);
+    element.style.setProperty("--rotate-plane-a", String(handle.plane.a));
+    element.style.setProperty("--rotate-plane-b", String(handle.plane.b));
+    element.style.setProperty("--rotate-plane-c", String(handle.plane.c));
+    element.style.setProperty("--rotate-plane-d", String(handle.plane.d));
   });
 }
 
@@ -6438,37 +6444,34 @@ function syncTransformOverlay(
   };
   const rotateLeft = screenOffsetFromCenter(project(sidePoint(rotationSides.x, frame.max.y)), 24);
   const rotateRight = screenOffsetFromCenter(project(sidePoint(rotationSides.z, frame.max.y)), 28);
-  const rotateBottom = screenOffsetFromCenter(project(sidePoint(rotationSides.y, footprintY)), 34);
+  const rotateBottomAnchor = screenOffsetFromCenter(project(sidePoint(rotationSides.y, footprintY)), 26);
+  const rotateBottom = { ...rotateBottomAnchor, y: rotateBottomAnchor.y - 5 };
   const xFaceCenter = sidePoint(rotationSides.x, 0);
   const zFaceCenter = sidePoint(rotationSides.z, 0);
   const yFaceCenter = bottomCenterWorld;
-  const projectedAxisAngle = (centerWorld: THREE.Vector3, axis: THREE.Vector3) => {
-    const from = project(centerWorld.clone().addScaledVector(axis, -1));
-    const to = project(centerWorld.clone().addScaledVector(axis, 1));
-    return THREE.MathUtils.radToDeg(Math.atan2(to.y - from.y, to.x - from.x));
-  };
-  const rotateWithWorkplane = !placementWorkplaneIsBase(activeWorkplane);
-  const xRotateAngle = rotateWithWorkplane
-    ? projectedAxisAngle(xFaceCenter, zFootAxis)
-    : ROTATION_UPPER_HANDLE_ICON_ANGLE;
-  const zRotateAngle = rotateWithWorkplane
-    ? projectedAxisAngle(zFaceCenter, xFootAxis)
-    : ROTATION_UPPER_HANDLE_ICON_ANGLE;
-  const yRotateTangent = rotationSides.y === "right" || rotationSides.y === "left"
-    ? zFootAxis
-    : xFootAxis;
-  const yRotateAngle = rotateWithWorkplane
-    ? projectedAxisAngle(yFaceCenter, yRotateTangent)
-    : ROTATION_BOTTOM_HANDLE_ICON_ANGLE;
+  const yRotationAxes = rotationSides.y === "near"
+    ? { u: xFootAxis, v: zFootAxis }
+    : rotationSides.y === "far"
+      ? { u: xFootAxis.clone().multiplyScalar(-1), v: zFootAxis.clone().multiplyScalar(-1) }
+      : rotationSides.y === "right"
+        ? { u: zFootAxis.clone().multiplyScalar(-1), v: xFootAxis }
+        : { u: zFootAxis, v: xFootAxis.clone().multiplyScalar(-1) };
   const planeRadius = 154;
-  const planeWorldStep = Math.max(12, Math.max(frame.width, frame.depth, frame.height) * 0.78);
+  const planeWorldStep = Math.max(0.1, cameraDistance * 0.01);
   const makePlaneView = (centerWorld: THREE.Vector3, uAxis: THREE.Vector3, vAxis: THREE.Vector3): RotationPlaneView => {
     const screenCenter = project(centerWorld);
-    const u = project(centerWorld.clone().add(uAxis.clone().multiplyScalar(planeWorldStep)));
-    const v = project(centerWorld.clone().add(vAxis.clone().multiplyScalar(planeWorldStep)));
-    const du = { x: u.x - screenCenter.x, y: u.y - screenCenter.y };
-    const dv = { x: v.x - screenCenter.x, y: v.y - screenCenter.y };
-    const longest = Math.max(12, Math.hypot(du.x, du.y), Math.hypot(dv.x, dv.y));
+    const uOffset = uAxis.clone().multiplyScalar(planeWorldStep);
+    const vOffset = vAxis.clone().multiplyScalar(planeWorldStep);
+    const uStart = project(centerWorld.clone().sub(uOffset));
+    const uEnd = project(centerWorld.clone().add(uOffset));
+    const vStart = project(centerWorld.clone().sub(vOffset));
+    const vEnd = project(centerWorld.clone().add(vOffset));
+    const du = { x: (uEnd.x - uStart.x) / 2, y: (uEnd.y - uStart.y) / 2 };
+    const dv = { x: (vEnd.x - vStart.x) / 2, y: (vEnd.y - vStart.y) / 2 };
+    const longest = Math.max(Math.hypot(du.x, du.y), Math.hypot(dv.x, dv.y));
+    if (!Number.isFinite(longest) || longest < 0.000001) {
+      return { x: screenCenter.x, y: screenCenter.y, a: 1, b: 0, c: 0, d: 1 };
+    }
     const scale = planeRadius / longest / 100;
     return {
       x: screenCenter.x,
@@ -6499,6 +6502,19 @@ function syncTransformOverlay(
     y: makePlaneView(yFaceCenter, xFootAxis, zFootAxis),
     z: makePlaneView(zFaceCenter, xFootAxis, yFootAxis),
   };
+  const makeCameraPlaneView = (uAxis: THREE.Vector3, vAxis: THREE.Vector3): RotationPlaneView => {
+    const u = uAxis.clone().transformDirection(state.camera.matrixWorldInverse);
+    const v = vAxis.clone().transformDirection(state.camera.matrixWorldInverse);
+    return { x: 0, y: 0, a: u.x, b: -u.y, c: v.x, d: -v.y };
+  };
+  const rotationHandlePlanes: Record<RotationAxis, RotationPlaneView> = {
+    // Project only the two plane axes through the camera rotation. Ignoring
+    // perspective translation keeps glyph appearance independent of object
+    // length and screen position while preserving camera foreshortening.
+    x: makeCameraPlaneView(zFootAxis, yFootAxis),
+    y: makeCameraPlaneView(yRotationAxes.u, yRotationAxes.v),
+    z: makeCameraPlaneView(xFootAxis, yFootAxis),
+  };
 
   const next = {
     id: frame.ids.join("|"),
@@ -6521,9 +6537,9 @@ function syncTransformOverlay(
       { key: liftHandleKey, className: showLowerHandles ? "height-lift lower" : "height-lift", kind: "lift" as const, x: liftPoint.x, y: liftPoint.y, title: "Lift", angle: liftHandleAngle },
     ],
     rotateHandles: [
-      { key: "rotate-left", className: "screen-left", x: rotateLeft.x, y: rotateLeft.y, angle: xRotateAngle },
-      { key: "rotate-right", className: "screen-right", x: rotateRight.x, y: rotateRight.y, angle: zRotateAngle },
-      { key: "rotate-bottom", className: "screen-bottom", x: rotateBottom.x, y: rotateBottom.y, angle: yRotateAngle },
+      { key: "rotate-left", className: "screen-left", x: rotateLeft.x, y: rotateLeft.y, plane: normalizedRotationPlaneBasis(rotationHandlePlanes.x, true) },
+      { key: "rotate-right", className: "screen-right", x: rotateRight.x, y: rotateRight.y, plane: normalizedRotationPlaneBasis(rotationHandlePlanes.z, true) },
+      { key: "rotate-bottom", className: "screen-bottom", x: rotateBottom.x, y: rotateBottom.y, plane: normalizedRotationPlaneBasis(rotationHandlePlanes.y, true) },
     ],
     dimensions: dimensionMarks,
     rotationWheel: rotationWheels.y,

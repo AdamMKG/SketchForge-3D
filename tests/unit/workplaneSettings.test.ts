@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { WorkplaneWorkspaceSettings } from "@/types/sketchforge";
 import { formatMeasurementNumber, lengthDisplayUnit, millimetersToDisplay, normalizeScaleForUnits, parseMeasurementInput, scaleOptionsForUnits } from "@/lib/measurementUnits";
-import { DEFAULT_SNAP_GRID, DEFAULT_WORKPLANE_WORKSPACE, normalizeSnapGrid, normalizeWorkspaceSettings, workplaneSettingsFingerprint, workspaceHydrationSyncDecision } from "@/lib/workplaneSettings";
+import { canBeginShapeDrag, DEFAULT_SNAP_GRID, DEFAULT_WORKPLANE_WORKSPACE, normalizeSnapGrid, normalizeWorkspaceSettings, workplaneSettingsFingerprint, workspaceHydrationSyncDecision } from "@/lib/workplaneSettings";
 
 describe("workplane settings helpers", () => {
   it("accepts known snap grid values and falls back for unknown values", () => {
@@ -32,6 +32,7 @@ describe("workplane settings helpers", () => {
           showShadows: false,
           showGrid: false,
           cruiseShapes: false,
+          selectBeforeMove: true,
           zoomSpeed: Infinity,
           units: "Bricks",
           scale: "1:10 (centimeters)",
@@ -49,6 +50,7 @@ describe("workplane settings helpers", () => {
       showShadows: false,
       showGrid: false,
       cruiseShapes: false,
+      selectBeforeMove: true,
       units: "Bricks",
       scale: "1:1 (studs)",
       accuracy: 3,
@@ -59,6 +61,12 @@ describe("workplane settings helpers", () => {
     expect(normalizeWorkspaceSettings({ historyLimit: 9000 }).historyLimit).toBe(5000);
     expect(normalizeWorkspaceSettings({ historyLimit: "invalid" }).historyLimit).toBe(100);
     expect(normalizeWorkspaceSettings({ gridColor: "not-a-color" }).gridColor).toBe(DEFAULT_WORKPLANE_WORKSPACE.gridColor);
+  });
+
+  it("can require selection before a shape starts moving", () => {
+    expect(canBeginShapeDrag(false, false)).toBe(true);
+    expect(canBeginShapeDrag(true, false)).toBe(false);
+    expect(canBeginShapeDrag(true, true)).toBe(true);
   });
 
   it("keeps scale options in the selected unit family", () => {

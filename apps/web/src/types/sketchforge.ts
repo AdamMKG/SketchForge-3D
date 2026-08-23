@@ -55,6 +55,7 @@ export type WorkplaneWorkspaceSettings = {
   showShadows: boolean;
   showGrid: boolean;
   cruiseShapes: boolean;
+  selectBeforeMove: boolean;
   zoomSpeed: number;
   units: string;
   scale: string;

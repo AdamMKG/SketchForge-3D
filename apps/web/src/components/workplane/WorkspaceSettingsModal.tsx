@@ -202,6 +202,11 @@ export function WorkspaceSettingsModal({
                     checked={moveDimensionsEnabled}
                     onChange={onMoveDimensionsEnabledChange}
                   />
+                  <WorkspaceToggle
+                    label="Select before moving"
+                    checked={workspace.selectBeforeMove}
+                    onChange={(selectBeforeMove) => patchWorkspace({ selectBeforeMove })}
+                  />
                   <WorkspaceToggle label="Show shadows" checked={workspace.showShadows} onChange={(showShadows) => patchWorkspace({ showShadows })} />
                   <WorkspaceToggle
                     label="Cruise when adding new shapes"

@@ -4737,8 +4737,8 @@ button {
 
 .rotate-handle {
   z-index: 3;
-  width: 42px;
-  height: 42px;
+  width: 52px;
+  height: 52px;
   color: rgba(47, 61, 70, 0.6);
   background: transparent;
   border: 0;
@@ -4746,7 +4746,7 @@ button {
   box-shadow: none;
   cursor: grab;
   opacity: 1;
-  transform: translate3d(var(--overlay-x, 0), var(--overlay-y, 0), 0) translate(-50%, -50%) rotate(var(--rotate-handle-angle, 0deg));
+  transform: translate3d(var(--overlay-x, 0), var(--overlay-y, 0), 0) translate(-50%, -50%);
 }
 
 .rotate-handle:hover {
@@ -4756,8 +4756,8 @@ button {
 .rotate-handle-icon,
 .rotate-handle-icon svg {
   display: block;
-  width: 18px;
-  height: 18px;
+  width: 26px;
+  height: 26px;
 }
 
 .rotate-handle-icon {
@@ -4769,6 +4769,16 @@ button {
 
 .rotate-handle-icon svg {
   fill: currentColor;
+  transform: matrix(
+    var(--rotate-plane-a, 1),
+    var(--rotate-plane-b, 0),
+    var(--rotate-plane-c, 0),
+    var(--rotate-plane-d, 1),
+    0,
+    0
+  );
+  transform-box: fill-box;
+  transform-origin: center;
 }
 
 .rotation-edit {

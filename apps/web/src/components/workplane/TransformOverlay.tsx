@@ -9,11 +9,13 @@ import {
 export {
   getElevationMeasureKey,
   measureKeyForHandle,
+  normalizedRotationPlaneBasis,
   type DimensionMark,
   type EditingDimension,
   type EditingRotation,
   type PinnedRotationWheelView,
   type RotationAxis,
+  type RotationPlaneBasis,
   type RotationPlaneView,
   type RotationReadout,
   type RotationWheelView,
@@ -240,7 +242,14 @@ export function TransformOverlay({
         <button
           key={handle.key}
           className={`rotate-handle ${handle.className}`}
-          style={{ "--overlay-x": `${handle.x}px`, "--overlay-y": `${handle.y}px`, "--rotate-handle-angle": `${handle.angle}deg` } as CSSProperties}
+          style={{
+            "--overlay-x": `${handle.x}px`,
+            "--overlay-y": `${handle.y}px`,
+            "--rotate-plane-a": handle.plane.a,
+            "--rotate-plane-b": handle.plane.b,
+            "--rotate-plane-c": handle.plane.c,
+            "--rotate-plane-d": handle.plane.d,
+          } as CSSProperties}
           title="Rotate"
           onPointerDown={(event) => {
             if (event.button === 0) {

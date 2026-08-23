@@ -13,6 +13,21 @@ export type RotationPlaneView = {
   d: number;
 };
 
+export type RotationPlaneBasis = Pick<RotationPlaneView, "a" | "b" | "c" | "d">;
+
+export function normalizedRotationPlaneBasis(plane: RotationPlaneView, invertVerticalAxis = false): RotationPlaneBasis {
+  const longestAxis = Math.max(Math.hypot(plane.a, plane.b), Math.hypot(plane.c, plane.d));
+  if (!Number.isFinite(longestAxis) || longestAxis < 0.000001) {
+    return { a: 1, b: 0, c: 0, d: 1 };
+  }
+  return {
+    a: plane.a / longestAxis,
+    b: plane.b / longestAxis,
+    c: (plane.c / longestAxis) * (invertVerticalAxis ? -1 : 1),
+    d: (plane.d / longestAxis) * (invertVerticalAxis ? -1 : 1),
+  };
+}
+
 export type PinnedRotationWheelView = {
   axis: RotationAxis;
   wheel: RotationWheelView;
@@ -46,7 +61,7 @@ export type TransformOverlayState = {
   height: number;
   guides: Array<{ x1: number; y1: number; x2: number; y2: number }>;
   handles: Array<{ key: string; className: string; kind: TransformHandleKind; x: number; y: number; title: string; angle?: number }>;
-  rotateHandles: Array<{ key: string; className: string; x: number; y: number; angle: number }>;
+  rotateHandles: Array<{ key: string; className: string; x: number; y: number; plane: RotationPlaneBasis }>;
   dimensions: Record<string, DimensionMark[]>;
   rotationWheel: RotationWheelView | null;
   rotationWheels: Record<RotationAxis, RotationWheelView>;
