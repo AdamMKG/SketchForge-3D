@@ -38,6 +38,56 @@ export function shapeDepth(shape: WorkplaneShape) {
   return shape.depth ?? shape.size;
 }
 
+export function normalizeTaperScale(value?: number) {
+  if (!Number.isFinite(value)) return 1;
+  return Math.min(3, Math.max(0.05, value as number));
+}
+
+function positiveTaperDimension(value: number | undefined, fallback: number) {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(0.01, value as number);
+}
+
+export function shapeTaperDimensions(shape: WorkplaneShape) {
+  const width = shapeWidth(shape);
+  const depth = shapeDepth(shape);
+  return {
+    topWidth: positiveTaperDimension(shape.taperTopWidth, width * normalizeTaperScale(shape.taperTopScale)),
+    topDepth: positiveTaperDimension(shape.taperTopDepth, depth * normalizeTaperScale(shape.taperTopScale)),
+    bottomWidth: positiveTaperDimension(shape.taperBottomWidth, width * normalizeTaperScale(shape.taperBottomScale)),
+    bottomDepth: positiveTaperDimension(shape.taperBottomDepth, depth * normalizeTaperScale(shape.taperBottomScale)),
+  };
+}
+
+export function shapeHasTaper(shape: WorkplaneShape) {
+  if (shape.kind === "gear") return false;
+  const width = shapeWidth(shape);
+  const depth = shapeDepth(shape);
+  const taper = shapeTaperDimensions(shape);
+  return Math.abs(taper.topWidth - width) > 1e-6 || Math.abs(taper.topDepth - depth) > 1e-6 || Math.abs(taper.bottomWidth - width) > 1e-6 || Math.abs(taper.bottomDepth - depth) > 1e-6;
+}
+
+export function shapeOverallFootprintDimensions(shape: WorkplaneShape) {
+  if (!shapeHasTaper(shape)) {
+    return { width: shapeWidth(shape), depth: shapeDepth(shape) };
+  }
+  const taper = shapeTaperDimensions(shape);
+  return {
+    width: Math.max(taper.topWidth, taper.bottomWidth),
+    depth: Math.max(taper.topDepth, taper.bottomDepth),
+  };
+}
+
+export function shapeTaperScaleAt(shape: WorkplaneShape, normalizedHeight: number, axis: "width" | "depth" = "width") {
+  if (shape.kind === "gear") return 1;
+  const taper = shapeTaperDimensions(shape);
+  const base = axis === "width" ? shapeWidth(shape) : shapeDepth(shape);
+  const bottom = axis === "width" ? taper.bottomWidth : taper.bottomDepth;
+  const top = axis === "width" ? taper.topWidth : taper.topDepth;
+  const t = Math.min(1, Math.max(0, Number.isFinite(normalizedHeight) ? normalizedHeight : 0));
+  return (bottom + (top - bottom) * t) / Math.max(0.01, base);
+}
+
 export function meshYawDegrees(shape: WorkplaneShape) {
   const isRoundPrimitive = !shape.importedMesh && (shape.kind === "cylinder" || shape.kind === "cone");
   const isCircular = Math.abs(shapeWidth(shape) - shapeDepth(shape)) < 0.0005;
@@ -199,6 +249,12 @@ export function workplaneShapesEqual(a: WorkplaneShape, b: WorkplaneShape) {
     a.segments === b.segments &&
     a.topRadius === b.topRadius &&
     a.baseRadius === b.baseRadius &&
+    a.taperTopWidth === b.taperTopWidth &&
+    a.taperTopDepth === b.taperTopDepth &&
+    a.taperBottomWidth === b.taperBottomWidth &&
+    a.taperBottomDepth === b.taperBottomDepth &&
+    a.taperTopScale === b.taperTopScale &&
+    a.taperBottomScale === b.taperBottomScale &&
     a.teeth === b.teeth &&
     a.toothSize === b.toothSize &&
     a.toothWidth === b.toothWidth &&

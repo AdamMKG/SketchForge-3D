@@ -802,8 +802,14 @@ export default function Home() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ dataUrl: snapshot.image, projectId: snapshot.projectId }),
     })
-      .then((response) => (response.ok ? response.json() : null))
-      .then((payload: { version?: number } | null) => {
+      .then(async (response) => {
+        if (!response.ok) {
+          const payload = await response.json().catch(() => null) as { error?: string } | null;
+          throw new Error(payload?.error ?? "Could not save project thumbnail");
+        }
+        return response.json() as Promise<{ version?: number }>;
+      })
+      .then((payload) => {
         const nextVersion = payload?.version ?? Date.now();
         const thumbnailUrl = `/api/project-thumbnail?projectId=${encodeURIComponent(snapshot.projectId)}&v=${nextVersion}`;
         setProjects((current) =>
@@ -1529,6 +1535,7 @@ function Dashboard({
           updateUrl: "",
           installationReady: true,
           requiresUpdateKey: false,
+          updateMode: "desktop",
         };
         setUpdateStatus(payload);
         if (result.updateAvailable && result.latestVersion) {
@@ -1597,6 +1604,7 @@ function Dashboard({
             updateUrl: "",
             installationReady: true,
             requiresUpdateKey: false,
+            updateMode: "desktop",
           });
           setUpdateMessage("SketchForge is already up to date.");
         } else {
@@ -1627,13 +1635,35 @@ function Dashboard({
         method: "POST",
         headers: { "x-sketchforge-update-key": updateKey.trim() },
       });
-      const payload = await response.json() as { accepted?: boolean; error?: string; updateUrl?: string };
+      const payload = await response.json() as { accepted?: boolean; error?: string; updateUrl?: string; updateMode?: "local" | "server"; restartRequired?: boolean };
       if (!response.ok || !payload.accepted) throw new Error(payload.error || "Could not start the update");
       if (updateStatus.latestVersion) {
         window.localStorage.setItem(DISMISSED_UPDATE_VERSION_STORAGE_KEY, updateStatus.latestVersion);
       }
-      setUpdateMessage("Update started. The server may briefly go offline; reopen this page after it restarts.");
       setUpdateKey("");
+      if (payload.updateMode === "local" || updateStatus.updateMode === "local") {
+        const expectedVersion = updateStatus.latestVersion;
+        setUpdateMessage("Update installed. Restarting local SketchForge…");
+        await new Promise((resolve) => window.setTimeout(resolve, 1800));
+        for (let attempt = 0; attempt < 60; attempt += 1) {
+          try {
+            const statusResponse = await fetch("/api/app-update?force=1", { cache: "no-store" });
+            if (statusResponse.ok) {
+              const statusPayload = await statusResponse.json() as AppUpdateStatus;
+              if (!expectedVersion || statusPayload.currentVersion === expectedVersion || !statusPayload.updateAvailable) {
+                window.location.reload();
+                return;
+              }
+            }
+          } catch {
+            // The local dev server is expected to be briefly unavailable while it restarts.
+          }
+          await new Promise((resolve) => window.setTimeout(resolve, 500));
+        }
+        setUpdateMessage("Update installed. Reload this page once local SketchForge finishes restarting.");
+      } else {
+        setUpdateMessage("Update started. The server may briefly go offline; reopen this page after it restarts.");
+      }
     } catch (error) {
       setUpdateMessage(error instanceof Error ? error.message : "Could not start the update");
     } finally {
@@ -1964,7 +1994,11 @@ function Dashboard({
             <div className="dashboard-update-copy">
               <p>Do you want to update from version {updateStatus.currentVersion}?</p>
               <div className="dashboard-update-safety">
-                Your projects are kept. Private projects stay in this browser, and Docker shared projects remain in the persistent <code>/data/projects</code> volume.
+                {updateStatus.updateMode === "local" ? (
+                  <>Your browser projects are kept. The updater only replaces the local SketchForge application files.</>
+                ) : (
+                  <>Your projects are kept. Private projects stay in this browser, and Docker shared projects remain in the persistent <code>/data/projects</code> volume.</>
+                )}
               </div>
               {!updateStatus.installationReady ? (
                 <div className="dashboard-update-note">One-click installation is not configured on this server. Continue to the safe update guide.</div>
@@ -2024,7 +2058,7 @@ function Dashboard({
           </label>
           <div className="dashboard-version-row">
             <span>SketchForge version</span>
-            <strong>{desktopAppVersion ?? SKF_CREATED_WITH_VERSION}</strong>
+            <strong>{desktopAppVersion ?? updateStatus?.currentVersion ?? SKF_CREATED_WITH_VERSION}</strong>
           </div>
           <section className="dashboard-update-settings" aria-label="Software updates">
             <div>

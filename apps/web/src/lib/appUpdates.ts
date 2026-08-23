@@ -8,6 +8,7 @@ export type AppUpdateStatus = {
   updateUrl: string;
   installationReady: boolean;
   requiresUpdateKey: boolean;
+  updateMode?: "local" | "server" | "desktop";
   checkError?: string;
 };
 

@@ -17,6 +17,10 @@ import {
   resizedShapeSize,
   serializeShapesForSync,
   shapeDepth,
+  shapeHasTaper,
+  shapeOverallFootprintDimensions,
+  shapeTaperDimensions,
+  shapeTaperScaleAt,
   shapeWidth,
   withHoleMode,
   workplaneShapesEqual,
@@ -76,6 +80,32 @@ describe("workplane shape helpers", () => {
     expect(proportionalResizeScale(50, 100, 100, 150)).toBe(2);
     expect(proportionalResizeScale(50, 100, 60, 200)).toBe(2);
     expect(proportionalResizeScale(50, 100, 25, 80)).toBe(0.5);
+  });
+
+  it("interpolates actual top and bottom taper dimensions while excluding gears", () => {
+    const tapered = shape({
+      taperBottomWidth: 10,
+      taperBottomDepth: 5,
+      taperTopWidth: 30,
+      taperTopDepth: 40,
+    });
+    expect(shapeTaperDimensions(tapered)).toEqual({ topWidth: 30, topDepth: 40, bottomWidth: 10, bottomDepth: 5 });
+    expect(shapeOverallFootprintDimensions(tapered)).toEqual({ width: 30, depth: 40 });
+    expect(shapeHasTaper(tapered)).toBe(true);
+    expect(shapeTaperScaleAt(tapered, 0, "width")).toBe(0.5);
+    expect(shapeTaperScaleAt(tapered, 0.5, "width")).toBe(1);
+    expect(shapeTaperScaleAt(tapered, 1, "width")).toBe(1.5);
+    expect(shapeTaperScaleAt(tapered, 0, "depth")).toBe(0.25);
+    expect(shapeTaperScaleAt(tapered, 0.5, "depth")).toBe(1.125);
+    expect(shapeTaperScaleAt(tapered, 1, "depth")).toBe(2);
+
+    const legacy = shape({ taperBottomScale: 0.5, taperTopScale: 1.5 });
+    expect(shapeTaperDimensions(legacy)).toEqual({ topWidth: 30, topDepth: 30, bottomWidth: 10, bottomDepth: 10 });
+
+    const gear = shape({ kind: "gear", taperBottomWidth: 10, taperTopWidth: 30 });
+    expect(shapeHasTaper(gear)).toBe(false);
+    expect(shapeTaperScaleAt(gear, 0.5, "width")).toBe(1);
+    expect(shapeTaperScaleAt(gear, 0.5, "depth")).toBe(1);
   });
 
   it("canonicalizes mirror flags and nested group rotations", () => {

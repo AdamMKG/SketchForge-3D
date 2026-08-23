@@ -22,7 +22,7 @@ import {
   gearToothPitch,
 } from "@/lib/gearGeometry";
 import { displayStepFromMillimeters, displayToMillimeters, formatMeasurementNumber, lengthDisplayUnit, millimetersToDisplay, parseMeasurementInput } from "@/lib/measurementUnits";
-import { resizedShapeSize, shapeDepth, shapeWidth } from "@/lib/workplaneShapes";
+import { resizedShapeSize, shapeDepth, shapeHasTaper, shapeOverallFootprintDimensions, shapeTaperDimensions, shapeWidth } from "@/lib/workplaneShapes";
 import { normalizeSketchRevolveSettings } from "@/lib/sketchRevolve";
 import type { GearType, GridSize, MeasurementAccuracy, WorkplaneShape, WorkplaneWorkspaceSettings } from "@/types/sketchforge";
 
@@ -104,18 +104,52 @@ function formatPropertyNumber(value: number, accuracy: MeasurementAccuracy, step
 }
 
 function propertyUsesLengthUnit(label: string) {
-  return ["Radius", "Length", "Width", "Height", "Bevel", "Top Radius", "Base Radius", "Thickness", "Tooth Size", "Tooth Width", "Center Hole"].includes(label);
+  return ["Radius", "Length", "Width", "Height", "Bevel", "Top Radius", "Base Radius", "Thickness", "Tooth Size", "Tooth Width", "Center Hole", "Top Length", "Top Width", "Bottom Length", "Bottom Width"].includes(label);
 }
 
 function getShapeProperties(shape: WorkplaneShape, onUpdate: ShapeInspectorUpdate): ShapePropertyConfig[] {
-  const width = shapeWidth(shape);
-  const depth = shapeDepth(shape);
-  const setWidth = (value: number) => onUpdate({ width: value, size: resizedShapeSize(value, depth) }, { resizeAxis: "width" });
-  const setDepth = (value: number) => onUpdate({ depth: value, size: resizedShapeSize(width, value) }, { resizeAxis: "depth" });
-  const setConeWidth = (value: number) => onUpdate({ width: value, baseRadius: value / 2, size: resizedShapeSize(value, depth) }, { resizeAxis: "width" });
+  const baseWidth = shapeWidth(shape);
+  const baseDepth = shapeDepth(shape);
+  const footprint = shapeOverallFootprintDimensions(shape);
+  const width = footprint.width;
+  const depth = footprint.depth;
+  const taper = shapeTaperDimensions(shape);
+  const widthPatch = (value: number): Partial<WorkplaneShape> => {
+    if (!shapeHasTaper(shape)) {
+      return { width: value, size: resizedShapeSize(value, baseDepth) };
+    }
+    const scale = value / Math.max(MIN_SHAPE_SIZE, width);
+    const nextBaseWidth = Math.max(MIN_SHAPE_SIZE, baseWidth * scale);
+    return {
+      width: nextBaseWidth,
+      size: resizedShapeSize(nextBaseWidth, baseDepth),
+      taperTopWidth: Math.max(MIN_SHAPE_SIZE, taper.topWidth * scale),
+      taperBottomWidth: Math.max(MIN_SHAPE_SIZE, taper.bottomWidth * scale),
+    };
+  };
+  const depthPatch = (value: number): Partial<WorkplaneShape> => {
+    if (!shapeHasTaper(shape)) {
+      return { depth: value, size: resizedShapeSize(baseWidth, value) };
+    }
+    const scale = value / Math.max(MIN_SHAPE_SIZE, depth);
+    const nextBaseDepth = Math.max(MIN_SHAPE_SIZE, baseDepth * scale);
+    return {
+      depth: nextBaseDepth,
+      size: resizedShapeSize(baseWidth, nextBaseDepth),
+      taperTopDepth: Math.max(MIN_SHAPE_SIZE, taper.topDepth * scale),
+      taperBottomDepth: Math.max(MIN_SHAPE_SIZE, taper.bottomDepth * scale),
+    };
+  };
+  const setWidth = (value: number) => onUpdate(widthPatch(value), { resizeAxis: "width" });
+  const setDepth = (value: number) => onUpdate(depthPatch(value), { resizeAxis: "depth" });
+  const setConeWidth = (value: number) => {
+    const patch = widthPatch(value);
+    patch.baseRadius = Math.max(MIN_SHAPE_SIZE, (patch.width ?? baseWidth) / 2);
+    onUpdate(patch, { resizeAxis: "width" });
+  };
   const setBaseRadius = (value: number) => {
     const diameter = value * 2;
-    onUpdate({ baseRadius: value, width: diameter, size: resizedShapeSize(diameter, depth) }, { resizeAxis: "width" });
+    onUpdate({ baseRadius: value, width: diameter, size: resizedShapeSize(diameter, baseDepth) }, { resizeAxis: "width" });
   };
   const setHeight = (height: number) => onUpdate({ height }, { resizeAxis: "height" });
 
@@ -171,7 +205,7 @@ function getShapeProperties(shape: WorkplaneShape, onUpdate: ShapeInspectorUpdat
   if (shape.kind === "cone") {
     return [
       { label: "Top Radius", value: shape.topRadius ?? 0, min: 0, max: 40, onChange: (topRadius) => onUpdate({ topRadius }) },
-      { label: "Base Radius", value: shape.baseRadius ?? width / 2, min: MIN_SHAPE_SIZE, max: 80, onChange: setBaseRadius },
+      { label: "Base Radius", value: shape.baseRadius ?? baseWidth / 2, min: MIN_SHAPE_SIZE, max: 80, onChange: setBaseRadius },
       { label: "Length", value: depth, min: MIN_SHAPE_SIZE, max: 160, onChange: setDepth },
       { label: "Width", value: width, min: MIN_SHAPE_SIZE, max: 160, onChange: setConeWidth },
       { label: "Height", value: shape.height, min: MIN_SHAPE_SIZE, max: 160, onChange: setHeight },
@@ -356,9 +390,41 @@ export function ShapeInspector({
   const gearHelixProperties = shape.kind === "gear"
     ? properties.filter((property) => ["Helix Angle", "Quality"].includes(property.label))
     : [];
+  const taper = shapeTaperDimensions(shape);
+  const taperProperties: ShapePropertyConfig[] = shape.kind === "gear" ? [] : [
+    {
+      label: "Top Length",
+      value: taper.topDepth,
+      min: MIN_SHAPE_SIZE,
+      max: 480,
+      onChange: (taperTopDepth) => onUpdate({ taperTopDepth, taperTopWidth: taper.topWidth, taperTopScale: undefined }),
+    },
+    {
+      label: "Top Width",
+      value: taper.topWidth,
+      min: MIN_SHAPE_SIZE,
+      max: 480,
+      onChange: (taperTopWidth) => onUpdate({ taperTopWidth, taperTopDepth: taper.topDepth, taperTopScale: undefined }),
+    },
+    {
+      label: "Bottom Length",
+      value: taper.bottomDepth,
+      min: MIN_SHAPE_SIZE,
+      max: 480,
+      onChange: (taperBottomDepth) => onUpdate({ taperBottomDepth, taperBottomWidth: taper.bottomWidth, taperBottomScale: undefined }),
+    },
+    {
+      label: "Bottom Width",
+      value: taper.bottomWidth,
+      min: MIN_SHAPE_SIZE,
+      max: 480,
+      onChange: (taperBottomWidth) => onUpdate({ taperBottomWidth, taperBottomDepth: taper.bottomDepth, taperBottomScale: undefined }),
+    },
+  ];
   const isSketchRevolve = shape.sketchOperation === "revolve" || Boolean(shape.sketchRevolve);
   const inspectorRef = useRef<HTMLElement>(null);
   const [propertiesOpen, setPropertiesOpen] = useState(true);
+  const [taperOpen, setTaperOpen] = useState(false);
   const [gearTeethOpen, setGearTeethOpen] = useState(true);
   const [gearHelixOpen, setGearHelixOpen] = useState(true);
   const [colorOpen, setColorOpen] = useState(false);
@@ -513,6 +579,25 @@ export function ShapeInspector({
           </div>
         ) : null}
       </div>
+      {shape.kind !== "gear" ? (
+        <div className={`property-card ${taperOpen ? "" : "collapsed"}`}>
+          <button
+            className="property-card-header"
+            type="button"
+            aria-expanded={taperOpen}
+            aria-controls={`taper-${shape.id}`}
+            onClick={() => setTaperOpen((open) => !open)}
+          >
+            <span>Taper</span>
+            <ChevronUp className={taperOpen ? "" : "collapsed"} size={25} strokeWidth={2.8} />
+          </button>
+          {taperOpen ? (
+            <div className="property-list" id={`taper-${shape.id}`}>
+              <ShapePropertyRows properties={taperProperties} workspace={workspace} disabled={locked} onInteractionActiveChange={onInteractionActiveChange} />
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       {shape.kind === "gear" ? (
         <div className={`property-card ${gearTeethOpen ? "" : "collapsed"}`}>
           <button
@@ -631,7 +716,7 @@ function RangeProperty({
   onChange,
   onInteractionActiveChange,
 }: RangePropertyConfig & { workspace: WorkplaneWorkspaceSettings; disabled?: boolean; onInteractionActiveChange?: (active: boolean) => void }) {
-  const allowsAboveSliderMax = label === "Length" || label === "Width" || label === "Height";
+  const allowsAboveSliderMax = label === "Length" || label === "Width" || label === "Height" || label.endsWith(" Length") || label.endsWith(" Width");
   const isLength = propertyUsesLengthUnit(label);
   const accuracy = workspace.accuracy;
   const actualValue = Math.max(min, Number.isFinite(value) ? value : min);
@@ -644,11 +729,6 @@ function RangeProperty({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(formatPropertyNumber(controlValue, accuracy, controlStep));
   const unit = isLength ? lengthDisplayUnit(workspace).label : null;
-  useEffect(() => {
-    if (!editing) {
-      setDraft(formatPropertyNumber(controlValue, accuracy, controlStep));
-    }
-  }, [accuracy, controlStep, controlValue, editing]);
   const toModelValue = (nextValue: number) => isLength ? displayToMillimeters(nextValue, workspace) : nextValue;
   const commitDraft = () => {
     const next = parseMeasurementInput(draft);

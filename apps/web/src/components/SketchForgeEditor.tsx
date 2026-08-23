@@ -1,6 +1,6 @@
 "use client";
 
-import { Check, CloudUpload, Download, Eye, FolderOpen, X } from "lucide-react";
+import { Check, Circle as CircleIcon, CloudUpload, Download, Eye, FolderOpen, Hexagon as HexagonIcon, Square as SquareIcon, Triangle as TriangleIcon, X } from "lucide-react";
 import type manifoldModule from "manifold-3d";
 import type { ManifoldToplevel } from "manifold-3d";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -48,7 +48,7 @@ import {
   ToolbarVectorExportIcon,
 } from "./icons";
 import { WorkplaneViewport } from "./WorkplaneViewport";
-import { SketchWorkspace, type SketchMeasurement, type SketchSelection, type SketchTool } from "./SketchWorkspace";
+import { SketchWorkspace, type SketchMeasurement, type SketchPrimitive, type SketchSelection, type SketchTool } from "./SketchWorkspace";
 import { EdgeModifierPanel } from "./workplane/EdgeModifierPanel";
 import {
   canonicalizeShape,
@@ -64,6 +64,8 @@ import {
   resizedImportedMeshPositions,
   serializeShapesForSync,
   shapeDepth,
+  shapeHasTaper,
+  shapeTaperScaleAt,
   shapeWidth,
   withHoleMode,
   workplaneShapesEqual,
@@ -89,6 +91,7 @@ import { exportMeshesToObj } from "@/lib/objExport";
 import { importedShapeFromObj } from "@/lib/objImport";
 import { attachProjectAsset, dedupeProjectAssets, projectAssetFromBytes, sourceFormatForFileName } from "@/lib/projectAssets";
 import { findSketchOutlineIntersection } from "@/lib/sketchProfileValidation";
+import { addLineIntersectionPoints, splitSketchSegment } from "@/lib/sketchPointRefinement";
 import { buildSketchRevolveMesh, DEFAULT_SKETCH_REVOLVE_SETTINGS, normalizeSketchRevolveSettings, type SketchRevolveMesh } from "@/lib/sketchRevolve";
 import { exportSkfProject, SKF_MEDIA_TYPE } from "@/lib/skfProject";
 import { makeShapeFromAsset, sceneShape, toolbarShapeAssets, type ToolbarShapeAsset } from "@/lib/shapeCatalog";
@@ -1387,6 +1390,15 @@ function shapeFromCadMesh(
     mirrorY: undefined,
     mirrorZ: undefined,
     radius: undefined,
+    // The CAD result is already generated from the final tapered surface. Do
+    // not carry the parametric taper fields onto this baked mesh or the viewport
+    // and subsequent mesh exports will apply the deformation a second time.
+    taperTopWidth: undefined,
+    taperTopDepth: undefined,
+    taperBottomWidth: undefined,
+    taperBottomDepth: undefined,
+    taperTopScale: undefined,
+    taperBottomScale: undefined,
     importedMesh: {
       positions: flattenedPositions,
       normals: flattenedNormals.length === flattenedPositions.length ? flattenedNormals : undefined,
@@ -1618,6 +1630,11 @@ function groupedShapeWithComponentEdgeTreatment(
 ) {
   if (
     !base.groupedShapes?.length ||
+    // A tapered group is sent to CAD as one baked final mesh because the parent
+    // deformation cannot be represented by its untapered child primitives.
+    // Keep the treated result flattened instead of rebuilding a nested group
+    // that would reintroduce the old pre-taper children.
+    shapeHasTaper(base) ||
     !hasOneToOneCadComponentMapping(sourceParts.length, session.componentPreviews.map((component) => component.owner))
   ) {
     return null;
@@ -1758,6 +1775,18 @@ async function restoreEdgeTreatmentInShape(shape: WorkplaneShape, path: number[]
 
 function transformMesh(mesh: MeshData, shape: WorkplaneShape): MeshData {
   const centerY = shape.height / 2;
+  const tapered = shapeHasTaper(shape);
+  let minLocalY = 0;
+  let maxLocalY = 1;
+  if (tapered && mesh.vertices.length) {
+    minLocalY = Number.POSITIVE_INFINITY;
+    maxLocalY = Number.NEGATIVE_INFINITY;
+    mesh.vertices.forEach((vertex) => {
+      minLocalY = Math.min(minLocalY, vertex[1]);
+      maxLocalY = Math.max(maxLocalY, vertex[1]);
+    });
+  }
+  const taperHeight = Math.max(1e-6, maxLocalY - minLocalY);
   const matrix = new THREE.Matrix4().makeRotationFromEuler(
     new THREE.Euler(
       THREE.MathUtils.degToRad(shape.rotationX ?? 0),
@@ -1773,7 +1802,10 @@ function transformMesh(mesh: MeshData, shape: WorkplaneShape): MeshData {
   return {
     ...mesh,
     vertices: mesh.vertices.map(([x, y, z]) => {
-      const vertex = new THREE.Vector3(x * mirrorX, (y - centerY) * mirrorY, z * mirrorZ).applyMatrix4(matrix);
+      const normalizedHeight = (y - minLocalY) / taperHeight;
+      const widthScale = tapered ? shapeTaperScaleAt(shape, normalizedHeight, "width") : 1;
+      const depthScale = tapered ? shapeTaperScaleAt(shape, normalizedHeight, "depth") : 1;
+      const vertex = new THREE.Vector3(x * widthScale * mirrorX, (y - centerY) * mirrorY, z * depthScale * mirrorZ).applyMatrix4(matrix);
       return [vertex.x + shape.x, vertex.y + (shape.elevation ?? 0) + centerY, vertex.z + shape.z] as Vec3;
     }),
     faces: reversedWinding ? mesh.faces.map(([a, b, c]) => [a, c, b] as [number, number, number]) : mesh.faces,
@@ -2334,6 +2366,10 @@ function shapeHasTransformToBake(shape: WorkplaneShape) {
 }
 
 function cadModifierPrimitiveForShape(shape: WorkplaneShape): CadModifierPrimitivePart | null {
+  // Taper is a non-affine deformation, so an analytic primitive or stored BREP
+  // cannot represent the final visible surface. Send the baked mesh to the CAD
+  // worker instead so edge selection/treatment matches the viewport exactly.
+  if (shapeHasTaper(shape)) return null;
   return cadModifierPrimitiveForBakedShape(shape)
     ?? (shapeHasTransformToBake(shape) ? cadModifierPrimitiveForAnalyticBox(shape) : null);
 }
@@ -2404,6 +2440,12 @@ function bakeShapeTransformIntoMesh(shape: WorkplaneShape): WorkplaneShape {
     mirrorX: undefined,
     mirrorY: undefined,
     mirrorZ: undefined,
+    taperTopWidth: undefined,
+    taperTopDepth: undefined,
+    taperBottomWidth: undefined,
+    taperBottomDepth: undefined,
+    taperTopScale: undefined,
+    taperBottomScale: undefined,
     importedMesh: {
       positions,
       baseWidth: rawWidth,
@@ -6204,7 +6246,7 @@ export function SketchForgeEditor({
 
   const commitSketchProfile = useCallback(
     (next: SketchProfile, message?: string) => {
-      const snapshot = cloneSketchProfile(next);
+      const snapshot = cloneSketchProfile(addLineIntersectionPoints(next, createLocalId));
       const current = sketchHistoryRef.current;
       const currentIndex = Math.min(sketchHistoryIndexRef.current, Math.max(0, current.length - 1));
       const trimmed = current.slice(0, currentIndex + 1);
@@ -6341,6 +6383,10 @@ export function SketchForgeEditor({
       line: "Line: click points to draw straight segments",
       bezier: "Bézier: click and drag points to pull curve handles",
       smooth: "Smooth curve: click points to build a flowing path",
+      rectangle: "Rectangle: drag across the sketch to create a closed rectangle",
+      circle: "Circle: drag a bounding box to create a closed circle",
+      triangle: "Triangle: drag a bounding box to create a closed triangle",
+      hexagon: "Hexagon: drag a bounding box to create a closed hexagon",
       select: "Select: edit sketch geometry or place and scale reference images",
       refine: "Refine: click a segment to add a point, or a point to remove it",
       erase: "Erase: click a point or segment to remove it",
@@ -6432,6 +6478,90 @@ export function SketchForgeEditor({
       setSketchSelection({ kind: "point", id: point.id });
     },
     [commitSketchProfile, connectSketchPoint, measureSketchPoint, sketchActivePointId, sketchProfile, sketchTool],
+  );
+
+  const addSketchPrimitive = useCallback(
+    (primitive: SketchPrimitive, center: { x: number; z: number } = { x: 0, z: 0 }) => {
+      const cx = center.x;
+      const cz = center.z;
+      const width = 20;
+      const depth = 20;
+      const radius = width / 2;
+      const minX = cx - width / 2;
+      const maxX = cx + width / 2;
+      const minZ = cz - depth / 2;
+      const maxZ = cz + depth / 2;
+      let points: SketchPoint[] = [];
+      let segments: SketchSegment[] = [];
+
+      if (primitive === "circle") {
+        const kappa = 0.5522847498307936;
+        const right: SketchPoint = {
+          id: createLocalId("sketch-point"), x: cx + radius, z: cz, mode: "smooth",
+          handleIn: { x: cx + radius, z: cz - kappa * radius },
+          handleOut: { x: cx + radius, z: cz + kappa * radius },
+        };
+        const bottom: SketchPoint = {
+          id: createLocalId("sketch-point"), x: cx, z: cz + radius, mode: "smooth",
+          handleIn: { x: cx + kappa * radius, z: cz + radius },
+          handleOut: { x: cx - kappa * radius, z: cz + radius },
+        };
+        const left: SketchPoint = {
+          id: createLocalId("sketch-point"), x: cx - radius, z: cz, mode: "smooth",
+          handleIn: { x: cx - radius, z: cz + kappa * radius },
+          handleOut: { x: cx - radius, z: cz - kappa * radius },
+        };
+        const top: SketchPoint = {
+          id: createLocalId("sketch-point"), x: cx, z: cz - radius, mode: "smooth",
+          handleIn: { x: cx - kappa * radius, z: cz - radius },
+          handleOut: { x: cx + kappa * radius, z: cz - radius },
+        };
+        points = [right, bottom, left, top];
+        segments = points.map((point, index) => ({
+          id: createLocalId("sketch-segment"),
+          startId: point.id,
+          endId: points[(index + 1) % points.length]!.id,
+          kind: "bezier",
+        }));
+      } else {
+        const vertices: Array<{ x: number; z: number }> = primitive === "rectangle"
+          ? [
+              { x: minX, z: minZ },
+              { x: maxX, z: minZ },
+              { x: maxX, z: maxZ },
+              { x: minX, z: maxZ },
+            ]
+          : primitive === "triangle"
+            ? [
+                { x: cx, z: minZ },
+                { x: maxX, z: maxZ },
+                { x: minX, z: maxZ },
+              ]
+            : Array.from({ length: 6 }, (_, index) => {
+                const angle = -Math.PI / 2 + index * Math.PI / 3;
+                return { x: cx + Math.cos(angle) * width / 2, z: cz + Math.sin(angle) * depth / 2 };
+              });
+        points = vertices.map((vertex) => ({ id: createLocalId("sketch-point"), ...vertex, mode: "corner" }));
+        segments = points.map((point, index) => ({
+          id: createLocalId("sketch-segment"),
+          startId: point.id,
+          endId: points[(index + 1) % points.length]!.id,
+          kind: "line",
+        }));
+      }
+
+      const next: SketchProfile = {
+        ...sketchProfile,
+        points: [...sketchProfile.points, ...points],
+        segments: [...sketchProfile.segments, ...segments],
+      };
+      const label = primitive[0]!.toUpperCase() + primitive.slice(1);
+      commitSketchProfile(next, `${label} added to sketch`);
+      setSketchActivePointId(null);
+      setSketchSelection({ kind: "multiple", pointIds: points.map((point) => point.id), segmentIds: segments.map((segment) => segment.id), imageIds: [] });
+      setSketchTool("select");
+    },
+    [commitSketchProfile, sketchProfile],
   );
 
   const pressSketchPoint = useCallback(
@@ -6584,6 +6714,15 @@ export function SketchForgeEditor({
     commitSketchProfile(next, "Sketch point moved");
   }, [commitSketchProfile, sketchProfile]);
 
+  const transformSketchPoints = useCallback((points: SketchPoint[], message = "Sketch geometry transformed") => {
+    if (!points.length) return;
+    const byId = new Map(points.map((point) => [point.id, point]));
+    commitSketchProfile({
+      ...sketchProfile,
+      points: sketchProfile.points.map((point) => byId.get(point.id) ?? point),
+    }, message);
+  }, [commitSketchProfile, sketchProfile]);
+
   const moveSketchHandle = useCallback((id: string, handle: "in" | "out", position: { x: number; z: number }) => {
     const next = cloneSketchProfile(sketchProfile);
     const point = next.points.find((entry) => entry.id === id);
@@ -6616,21 +6755,11 @@ export function SketchForgeEditor({
     commitSketchProfile(next, mode === "corner" ? "Made corner" : mode === "smooth" ? "Made smooth" : "Curve handles split");
   }, [commitSketchProfile, sketchProfile]);
 
-  const insertSketchPoint = useCallback((segmentId: string, position: { x: number; z: number }) => {
-    const segment = sketchProfile.segments.find((entry) => entry.id === segmentId);
-    if (!segment) return;
-    const point: SketchPoint = { id: createLocalId("sketch-point"), ...position, mode: segment.kind === "line" ? "corner" : "smooth" };
-    let next: SketchProfile = {
-      ...sketchProfile,
-      points: [...sketchProfile.points, point],
-      segments: sketchProfile.segments.flatMap((entry) => entry.id === segmentId ? [
-        { ...entry, id: createLocalId("sketch-segment"), endId: point.id },
-        { ...entry, id: createLocalId("sketch-segment"), startId: point.id },
-      ] : [entry]),
-    };
-    if (segment.kind === "smooth") next = withSmoothSketchHandles(next);
-    commitSketchProfile(next, "Point added to path");
-    setSketchSelection({ kind: "point", id: point.id });
+  const insertSketchPoint = useCallback((segmentId: string, _position: { x: number; z: number }, amount: number) => {
+    const result = splitSketchSegment(sketchProfile, segmentId, amount, createLocalId);
+    if (!result.pointId) return;
+    if (result.inserted) commitSketchProfile(result.profile, "Point added to path");
+    setSketchSelection({ kind: "point", id: result.pointId });
     setSketchTool("select");
   }, [commitSketchProfile, sketchProfile]);
 
@@ -7149,7 +7278,7 @@ export function SketchForgeEditor({
     invalidateCadModifierSession();
     const appliedEdgeTreatmentCount = edgeTreatmentFeatureCount(selectedShape);
     const hasAppliedEdgeTreatment = Boolean(selectedShape.importedMesh && selectedShape.edgeTreatments?.length);
-    const sourceParts = (selectedShape.groupedShapes?.length && !hasAppliedEdgeTreatment
+    const sourceParts = (selectedShape.groupedShapes?.length && !hasAppliedEdgeTreatment && !shapeHasTaper(selectedShape)
       ? restoreGroupedChildren(selectedShape)
       : [selectedShape]).flatMap(cadModifierSourceParts);
     const partInputs: Array<{ shape: WorkplaneShape; mesh?: MeshData; brep?: string; brepTransform?: number[]; primitive?: CadModifierPrimitivePart }> = sourceParts.map((shape) => {
@@ -7159,6 +7288,7 @@ export function SketchForgeEditor({
         Math.abs(shapeDepth(shape) - (frame?.depth ?? shapeDepth(shape))) > 1e-6 ||
         Math.abs(shape.height - (frame?.height ?? shape.height)) > 1e-6
       );
+      if (shapeHasTaper(shape)) return { shape, mesh: meshForShape(shape) };
       const primitive = cadModifierPrimitiveForShape(shape);
       if (primitive) return { shape, primitive };
       return shape.cadBrep && frame && !preserveNeedsRetessellation
@@ -7224,7 +7354,7 @@ export function SketchForgeEditor({
     }
     const appliedEdgeTreatmentCount = edgeTreatmentFeatureCount(shape);
     const hasAppliedEdgeTreatment = Boolean(shape.importedMesh && shape.edgeTreatments?.length);
-    const sourceParts = (shape.groupedShapes?.length && !hasAppliedEdgeTreatment
+    const sourceParts = (shape.groupedShapes?.length && !hasAppliedEdgeTreatment && !shapeHasTaper(shape)
       ? restoreGroupedChildren(shape)
       : [shape]).flatMap(cadModifierSourceParts);
     const partInputs: Array<{ shape: WorkplaneShape; mesh?: MeshData; brep?: string; brepTransform?: number[]; primitive?: CadModifierPrimitivePart }> = sourceParts.map((partShape) => {
@@ -7234,6 +7364,7 @@ export function SketchForgeEditor({
         Math.abs(shapeDepth(partShape) - (frame?.depth ?? shapeDepth(partShape))) > 1e-6 ||
         Math.abs(partShape.height - (frame?.height ?? partShape.height)) > 1e-6
       );
+      if (shapeHasTaper(partShape)) return { shape: partShape, mesh: meshForShape(partShape) };
       const primitive = cadModifierPrimitiveForShape(partShape);
       if (primitive) return { shape: partShape, primitive };
       return partShape.cadBrep && frame && !preserveNeedsRetessellation
@@ -8359,7 +8490,8 @@ export function SketchForgeEditor({
     }
     const meshes = exportable.map(meshForShape);
     if (format === "stl") {
-      void downloadTextFile(projectExportFileName(exportName, "stl"), exportMeshesToStl(meshes), "model/stl")
+      const blob = new Blob([exportMeshesToStl(meshes)], { type: "model/stl" });
+      void downloadBlobFile(projectExportFileName(exportName, "stl"), blob)
         .then((result) => finishNotice("STL", result))
         .catch((error: unknown) => failNotice("STL", error));
       return;
@@ -8821,7 +8953,7 @@ export function SketchForgeEditor({
         return;
       }
 
-      if (!shortcut && !event.altKey && key === "r" && hasSelection) {
+      if (!shortcut && !event.altKey && (event.code === "KeyR" || key === "r") && hasSelection) {
         event.preventDefault();
         rotateSelected45();
         return;
@@ -8931,6 +9063,7 @@ export function SketchForgeEditor({
         onStartSketch={(operation) => beginSketch(operation)}
         onEditSketch={beginSketchEdit}
         onSketchTool={setActiveSketchTool}
+        onSketchPrimitive={(primitive) => addSketchPrimitive(primitive, { x: 0, z: 0 })}
         onSketchImage={() => {
           if (sketchTool !== "select") {
             setNotice("Choose Select before adding a sketch image");
@@ -8985,6 +9118,7 @@ export function SketchForgeEditor({
             initialSnap={snapGrid}
             initialWorkspace={workspaceSettings}
             onPlanePoint={addSketchPlanePoint}
+            onAddPrimitive={addSketchPrimitive}
             onPointPress={pressSketchPoint}
             onSelectSegment={(id) => {
               setSketchSelection({ kind: "segment", id });
@@ -9006,6 +9140,7 @@ export function SketchForgeEditor({
             onDeletePoint={deleteSketchPoint}
             onDeleteSegment={deleteSketchSegment}
             onMovePoint={moveSketchPoint}
+            onTransformPoints={transformSketchPoints}
             onMoveHandle={moveSketchHandle}
             onInsertPoint={insertSketchPoint}
             onSetPointMode={setSketchPointMode}
@@ -9227,6 +9362,7 @@ function SecondaryToolbar({
   onStartSketch,
   onEditSketch,
   onSketchTool,
+  onSketchPrimitive,
   onSketchImage,
   onSketchUndo,
   onSketchRedo,
@@ -9278,6 +9414,7 @@ function SecondaryToolbar({
   onStartSketch: (operation: SketchOperation) => void;
   onEditSketch: () => void;
   onSketchTool: (tool: SketchTool) => void;
+  onSketchPrimitive: (primitive: SketchPrimitive) => void;
   onSketchImage: () => void;
   onSketchUndo: () => void;
   onSketchRedo: () => void;
@@ -9644,6 +9781,23 @@ function SecondaryToolbar({
                     </button>
                     <button className={`toolbar-icon sketch-tool-icon ${sketchTool === "smooth" ? "active" : ""}`} type="button" aria-label="Smooth Curve" title="Smooth Curve" onClick={() => onSketchTool("smooth")}>
                       <SketchReferenceIcon name="smooth" />
+                    </button>
+                  </div>
+                </div>
+                <div className="toolbar-section sketch-shapes-section">
+                  <div className="toolbar-section-label">Shapes</div>
+                  <div className="toolbar-section-tools">
+                    <button className="toolbar-icon sketch-tool-icon sketch-primitive-source" type="button" draggable aria-label="Rectangle" title="Click to add at sketch origin, or drag onto the sketch" onClick={() => onSketchPrimitive("rectangle")} onDragStart={(event) => { event.dataTransfer.effectAllowed = "copy"; event.dataTransfer.setData("application/x-sketchforge-sketch-primitive", "rectangle"); }}>
+                      <SquareIcon size={25} strokeWidth={1.8} />
+                    </button>
+                    <button className="toolbar-icon sketch-tool-icon sketch-primitive-source" type="button" draggable aria-label="Circle" title="Click to add at sketch origin, or drag onto the sketch" onClick={() => onSketchPrimitive("circle")} onDragStart={(event) => { event.dataTransfer.effectAllowed = "copy"; event.dataTransfer.setData("application/x-sketchforge-sketch-primitive", "circle"); }}>
+                      <CircleIcon size={25} strokeWidth={1.8} />
+                    </button>
+                    <button className="toolbar-icon sketch-tool-icon sketch-primitive-source" type="button" draggable aria-label="Triangle" title="Click to add at sketch origin, or drag onto the sketch" onClick={() => onSketchPrimitive("triangle")} onDragStart={(event) => { event.dataTransfer.effectAllowed = "copy"; event.dataTransfer.setData("application/x-sketchforge-sketch-primitive", "triangle"); }}>
+                      <TriangleIcon size={25} strokeWidth={1.8} />
+                    </button>
+                    <button className="toolbar-icon sketch-tool-icon sketch-primitive-source" type="button" draggable aria-label="Hexagon" title="Click to add at sketch origin, or drag onto the sketch" onClick={() => onSketchPrimitive("hexagon")} onDragStart={(event) => { event.dataTransfer.effectAllowed = "copy"; event.dataTransfer.setData("application/x-sketchforge-sketch-primitive", "hexagon"); }}>
+                      <HexagonIcon size={25} strokeWidth={1.8} />
                     </button>
                   </div>
                 </div>
