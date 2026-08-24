@@ -55,7 +55,7 @@ SketchForge inspects ZIP metadata before expansion and validates the entire proj
 
 Opening a valid `.skf` creates a new local project. It does not overwrite the project that is currently open. The imported project is then saved through the existing dashboard, thumbnail, IndexedDB, history, and editor lifecycle.
 
-Current safety limits are 512 MB compressed, 1 GB expanded, 256 MB per asset, 32 MB for `project.json`, 4,096 archive entries, 100,000 object nodes per state, and 5,001 distinct states. The live editor retains at most 5,000 history entries and 64 MB of serialized history, so Unlimited means all history currently available inside those safety limits.
+Current safety limits are 512 MB compressed, 1 GB expanded, 256 MB per asset, 64 MB for `project.json`, 4,096 archive entries, 100,000 object nodes per state, and 5,001 distinct states. The live editor retains at most 5,000 history entries and 64 MB of serialized history, so Unlimited means all history currently available inside those safety limits.
 
 ## Compatibility and migrations
 

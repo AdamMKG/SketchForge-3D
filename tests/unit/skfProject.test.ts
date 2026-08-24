@@ -9,6 +9,7 @@ import {
   importSkfProject,
   inspectSkfProjectPackage,
   SKF_FORMAT_VERSION,
+  SKF_LIMITS,
   SKF_SCHEMA_ID,
   type SkfProjectDocumentV1,
   type SkfProjectExportInput,
@@ -330,6 +331,28 @@ describe("SketchForge .skf project packages", () => {
     expect(restored.shapes[0].importedMesh?.assetId).toBe(restored.assets[0].id);
   });
 
+  it("shares decoded derived-mesh arrays across restored history states", async () => {
+    const importedMesh: NonNullable<WorkplaneShape["importedMesh"]> = {
+      positions: [0, 0, 0, 1, 0, 0, 0, 1, 0],
+      normals: [0, 0, 1, 0, 0, 1, 0, 0, 1],
+      baseWidth: 1,
+      baseDepth: 1,
+      baseHeight: 1,
+      triangleCount: 1,
+      sourceFormat: "json",
+    };
+    const before = shape("mesh", "derived-history", { importedMesh, x: 0 });
+    const after = { ...before, x: 20 };
+    const history = [editorHistoryEntry([before], []), editorHistoryEntry([after], [after.id])];
+
+    const restored = await importSkfProject(await exportSkfProject(input([after], { history, historyIndex: 1 })));
+    const firstPositions = restored.history[0].shapes[0].importedMesh?.positions;
+    const secondPositions = restored.history[1].shapes[0].importedMesh?.positions;
+
+    expect(firstPositions).toBe(secondPositions);
+    expect(restored.shapes[0].importedMesh?.positions).toBe(secondPositions);
+  });
+
   it.each(["svg", "step"] as const)("stores and restores original %s sources", async (sourceFormat) => {
     const asset = await projectAssetFromBytes(`source.${sourceFormat}`, sourceFormat, strToU8(`${sourceFormat} source`));
     const importedMesh: NonNullable<WorkplaneShape["importedMesh"]> = {
@@ -427,6 +450,22 @@ describe("SketchForge .skf project packages", () => {
       if (originalTz === undefined) delete process.env.TZ;
       else process.env.TZ = originalTz;
     }
+  });
+
+  it("writes compact project data that stays compatible with the reader limit", async () => {
+    const exported = await exportSkfProject(input([shape("box")]));
+    const { files, document } = packageDocument(exported);
+    const projectJson = strFromU8(files["project.json"]);
+
+    expect(projectJson).toBe(JSON.stringify(document));
+    await expect(importSkfProject(exported)).resolves.toMatchObject({ projectName: "Round trip" });
+  });
+
+  it("refuses to create an .skf package that its reader cannot reopen", async () => {
+    const oversizedName = "x".repeat(SKF_LIMITS.projectJsonBytes);
+
+    await expect(exportSkfProject(input([shape("box")], { projectName: oversizedName })))
+      .rejects.toThrow("Project data exceeds the 64 MB .skf limit");
   });
 
   it("migrates the documented v0 JSON project without changing IDs", async () => {

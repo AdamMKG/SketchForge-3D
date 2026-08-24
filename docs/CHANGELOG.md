@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.7
+
+- Raised the supported `project.json` size in `.skf` packages from 32 MiB to 64 MiB and compacted new project exports without removing editable data.
+- Reused decoded derived-mesh data across restored history states to reduce memory pressure when opening large `.skf` projects.
+- Prevented workspace-only changes from advancing the persisted shape revision and replacing newer live objects with an older snapshot.
+
 ## 1.0.6
 
 - Fixed dense STL imports failing with `Invalid string length` while creating their initial undo-history fingerprint.

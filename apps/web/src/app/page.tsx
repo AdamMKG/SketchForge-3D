@@ -918,6 +918,9 @@ export default function Home() {
         )}:${project.placementElevation ?? 0}:${placementWorkplaneFingerprint(normalizePlacementWorkplane(project.placementWorkplane, project.placementElevation))}:${placementWorkplaneFingerprint(normalizePlacementWorkplane(project.sketchPlacementWorkplane))}`;
         if (currentFingerprint === nextFingerprint) return project;
         changed = true;
+        // `revision` tracks the IndexedDB shape snapshot. Advancing it for a
+        // workspace-only change can make the loader replace newer live shapes
+        // with an older persisted snapshot while autosave is still pending.
         return {
           ...project,
           workspace,
@@ -926,7 +929,6 @@ export default function Home() {
           placementWorkplane,
           sketchPlacementWorkplane,
           updatedAt: version,
-          revision: version,
         };
       });
       if (!changed) return current;

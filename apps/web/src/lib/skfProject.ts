@@ -12,13 +12,13 @@ import type { GridSize, ProjectAsset, ProjectAssetSourceFormat, SketchOperation,
 export const SKF_SCHEMA_ID = "com.sketchforge.project";
 export const SKF_FORMAT_VERSION = 1;
 export const SKF_MINIMUM_READER_VERSION = 1;
-export const SKF_CREATED_WITH_VERSION = "1.0.6";
+export const SKF_CREATED_WITH_VERSION = "1.0.7";
 export const SKF_MEDIA_TYPE = "application/vnd.sketchforge.project+zip";
 
 export const SKF_LIMITS = {
   archiveBytes: 512 * 1024 * 1024,
   expandedBytes: 1024 * 1024 * 1024,
-  projectJsonBytes: 32 * 1024 * 1024,
+  projectJsonBytes: 64 * 1024 * 1024,
   assetBytes: 256 * 1024 * 1024,
   entries: 4096,
   states: 5001,
@@ -751,7 +751,11 @@ export async function exportSkfProject(input: SkfProjectExportInput) {
       sketchPlacementWorkplane,
     },
   };
-  builder.files["project.json"] = strToU8(`${JSON.stringify(document, null, 2)}\n`);
+  const projectJson = strToU8(JSON.stringify(document));
+  if (projectJson.byteLength > SKF_LIMITS.projectJsonBytes) {
+    throw new Error("Project data exceeds the 64 MB .skf limit. Export with fewer history steps or simplify the project.");
+  }
+  builder.files["project.json"] = projectJson;
   return zipAsync(Object.fromEntries(Object.entries(builder.files).sort(([a], [b]) => a.localeCompare(b))), input.compressionLevel);
 }
 
@@ -1064,6 +1068,7 @@ async function restoreShapeFromNode(
   files: ArchiveFiles,
   runtimeAssetByArchiveId: Map<string, ProjectAsset>,
   sourceMeshCache: Map<string, Promise<NonNullable<WorkplaneShape["importedMesh"]>>>,
+  derivedMeshCache: Map<string, ReturnType<typeof decodeMeshCache>>,
   sourceImporter: SkfSourceImporter,
   restoring = new Set<string>(),
 ): Promise<WorkplaneShape> {
@@ -1106,7 +1111,11 @@ async function restoreShapeFromNode(
   } else if (node.importedMesh?.meshAssetId) {
     const meshRecord = assetById.get(node.importedMesh.meshAssetId);
     if (!meshRecord) throw new Error(`Object '${node.objectId}' is missing its derived mesh`);
-    const decoded = decodeMeshCache(files[meshRecord.path]);
+    let decoded = derivedMeshCache.get(meshRecord.id);
+    if (!decoded) {
+      decoded = decodeMeshCache(files[meshRecord.path]);
+      derivedMeshCache.set(meshRecord.id, decoded);
+    }
     const brepRecord = node.importedMesh.brepStepAssetId ? assetById.get(node.importedMesh.brepStepAssetId) : undefined;
     importedMesh = {
       ...decoded,
@@ -1120,14 +1129,14 @@ async function restoreShapeFromNode(
   }
 
   const groupedShapes = node.groupedShapeNodeIds?.length
-    ? await Promise.all(node.groupedShapeNodeIds.map((childId) => restoreShapeFromNode(childId, nodeById, assetById, files, runtimeAssetByArchiveId, sourceMeshCache, sourceImporter, new Set(restoring))))
+    ? await Promise.all(node.groupedShapeNodeIds.map((childId) => restoreShapeFromNode(childId, nodeById, assetById, files, runtimeAssetByArchiveId, sourceMeshCache, derivedMeshCache, sourceImporter, new Set(restoring))))
     : undefined;
   const edgeTreatmentHistory = node.edgeTreatmentHistory?.length
     ? await Promise.all(node.edgeTreatmentHistory.map(async (entry) => ({
         id: entry.id,
         createdAt: entry.createdAt,
         feature: entry.feature as NonNullable<WorkplaneShape["edgeTreatmentHistory"]>[number]["feature"],
-        before: await restoreShapeFromNode(entry.beforeNodeId, nodeById, assetById, files, runtimeAssetByArchiveId, sourceMeshCache, sourceImporter, new Set(restoring)),
+        before: await restoreShapeFromNode(entry.beforeNodeId, nodeById, assetById, files, runtimeAssetByArchiveId, sourceMeshCache, derivedMeshCache, sourceImporter, new Set(restoring)),
         ...(entry.appliedFrame ? { appliedFrame: entry.appliedFrame as NonNullable<WorkplaneShape["edgeTreatmentHistory"]>[number]["appliedFrame"] } : {}),
       })))
     : undefined;
@@ -1158,6 +1167,7 @@ async function restoreV1(document: SkfProjectDocumentV1, assetById: Map<string, 
     runtimeAssetByArchiveId.set(record.id, asset);
   }
   const sourceMeshCache = new Map<string, Promise<NonNullable<WorkplaneShape["importedMesh"]>>>();
+  const derivedMeshCache = new Map<string, ReturnType<typeof decodeMeshCache>>();
   const sourceImporter = options.sourceImporter ?? defaultSourceImporter;
   const restoredStates = new Map<string, WorkplaneShape[]>();
   for (const state of document.states) {
@@ -1169,6 +1179,7 @@ async function restoreV1(document: SkfProjectDocumentV1, assetById: Map<string, 
       files,
       runtimeAssetByArchiveId,
       sourceMeshCache,
+      derivedMeshCache,
       sourceImporter,
     )));
     restoredStates.set(state.id, shapes);
