@@ -1,3 +1,4 @@
+import { isBuiltinFontName } from "@/lib/textFonts";
 import type { ProjectAsset, ProjectAssetSourceFormat, WorkplaneShape } from "@/types/sketchforge";
 
 function exactArrayBuffer(bytes: Uint8Array) {
@@ -113,6 +114,7 @@ export function sourceFormatForFileName(fileName: string): ProjectAssetSourceFor
   const extension = fileName.split(".").pop()?.toLowerCase();
   if (extension === "stl" || extension === "obj" || extension === "svg") return extension;
   if (extension === "step" || extension === "stp") return "step";
+  if (extension === "ttf" || extension === "otf" || extension === "woff" || extension === "woff2") return "typeface";
   return null;
 }
 
@@ -120,6 +122,7 @@ export function defaultMediaTypeForSource(format: ProjectAssetSourceFormat) {
   if (format === "svg") return "image/svg+xml";
   if (format === "step") return "application/step";
   if (format === "obj") return "model/obj";
+  if (format === "typeface") return "application/vnd.sketchforge.typeface+json";
   return "model/stl";
 }
 
@@ -182,6 +185,7 @@ export function projectAssetIdsInShapes(shapes: WorkplaneShape[]) {
   const ids = new Set<string>();
   const visit = (shape: WorkplaneShape) => {
     if (shape.importedMesh?.assetId) ids.add(shape.importedMesh.assetId);
+    if (shape.kind === "text" && shape.font && !isBuiltinFontName(shape.font)) ids.add(shape.font);
     shape.groupedShapes?.forEach(visit);
     shape.edgeTreatmentHistory?.forEach((entry) => visit(entry.before));
   };

@@ -127,7 +127,7 @@ describe("SketchForge .skf project packages", () => {
     expect(document.assets.filter((entry) => entry.kind === "derived-mesh")).toHaveLength(0);
   });
 
-  it("preserves an oriented placement workplane", async () => {
+it("preserves an oriented placement workplane", async () => {
     const placementWorkplane = placementWorkplaneFromSurface(
       { x: 12, y: 8, z: -3 },
       { x: 1, y: 0, z: 0 },
@@ -147,6 +147,36 @@ describe("SketchForge .skf project packages", () => {
 
     expect(restored.placementWorkplane).toEqual(placementWorkplane);
     expect(restored.sketchPlacementWorkplane).toEqual(sketchPlacementWorkplane);
+  });
+
+  it("packages and restores custom text font assets referenced by text shapes", async () => {
+    const fontBytes = strToU8(JSON.stringify({
+      familyName: "Custom Test",
+      resolution: 1000,
+      ascender: 800,
+      descender: -200,
+      underlineThickness: 50,
+      underlinePosition: -100,
+      boundingBox: { xMin: 0, yMin: 0, xMax: 500, yMax: 700 },
+      glyphs: { "A": { x_min: 0, x_max: 500, ha: 500, o: "m 0 0 l 500 700" } },
+    }));
+    const fontAsset = await projectAssetFromBytes("Custom Test", "typeface", fontBytes);
+    const label = shape("text", "text-custom", {
+      text: "Custom",
+      font: fontAsset.id,
+    });
+    const restored = await importSkfProject(await exportSkfProject(input([label], { assets: [fontAsset] })));
+    const restoredFont = restored.assets.find((asset) => asset.sourceFormat === "typeface");
+    expect(restored.shapes[0].font).toBe(restoredFont?.id);
+    expect(restoredFont?.sourceFormat).toBe("typeface");
+    expect(restoredFont?.bytes).toEqual(fontBytes);
+    expect(restoredFont?.sha256).toBe(fontAsset.sha256);
+  });
+
+  it("drops a custom font asset that no shape references", async () => {
+    const fontAsset = await projectAssetFromBytes("Orphan Font", "typeface", strToU8(JSON.stringify({ familyName: "Orphan", resolution: 1000, glyphs: {} })));
+    const restored = await importSkfProject(await exportSkfProject(input([shape("box", "plain-box")], { assets: [fontAsset] })));
+    expect(restored.assets.some((asset) => asset.sourceFormat === "typeface")).toBe(false);
   });
 
   it("preserves editable revolve sketch settings and generated geometry", async () => {
@@ -415,6 +445,20 @@ describe("SketchForge .skf project packages", () => {
     expect(restored.shapes[0].imagePlate?.dataUrl).toBe(dataUrl);
     expect(restored.shapes[0].sketchProfile?.images?.[0].dataUrl).toBe(dataUrl);
     expect(restored.shapes[0].sketchProfile?.images?.[0].locked).toBe(true);
+  });
+
+  it("packages and restores per-face textures as deduplicated image assets", async () => {
+    const dataUrl = "data:image/png;base64,AAECAwQ=";
+    const faceTextures = {
+      top: { dataUrl, mimeType: "image/png", pixelWidth: 2, pixelHeight: 2, useAsBump: false, bumpScale: 0.05 },
+      front: { dataUrl, mimeType: "image/png", pixelWidth: 2, pixelHeight: 2, useAsBump: true, bumpScale: 0.2 },
+    };
+    const exported = await exportSkfProject(input([shape("box", "painted-box", { faceTextures })]));
+    const { document } = packageDocument(exported);
+    const restored = await importSkfProject(exported);
+
+    expect(document.assets.filter((entry) => entry.kind === "image")).toHaveLength(1);
+    expect(restored.shapes[0].faceTextures).toEqual(faceTextures);
   });
 
   it("deduplicates derived geometry when legacy imported objects share one mesh", async () => {

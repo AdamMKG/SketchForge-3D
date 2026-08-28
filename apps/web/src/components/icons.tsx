@@ -140,6 +140,18 @@ export function ToolbarIntersectionIcon(props: IconProps) {
   );
 }
 
+export function ToolbarDistributeIcon(props: IconProps) {
+  return (
+    <svg viewBox="0 0 48 48" aria-hidden="true" {...props}>
+      <rect x="7" y="9" width="13" height="13" rx="2" fill="none" stroke="currentColor" strokeWidth="2.4" />
+      <rect x="28" y="9" width="13" height="13" rx="2" fill="none" stroke="currentColor" strokeWidth="2.4" />
+      <rect x="7" y="27" width="13" height="13" rx="2" fill="none" stroke="currentColor" strokeWidth="2.4" />
+      <path d="M34.5 27v4.5H30" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M34.5 31.5H36a2.5 2.5 0 0 1 2.5 2.5v0a2.5 2.5 0 0 1-2.5 2.5h-4.5" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 export function ToolbarAlignIcon(props: IconProps) {
   return <ToolbarSpriteIcon rect={{ x: 97.3, y: 46.7, width: 29.1, height: 32.5 }} {...props} />;
 }
@@ -154,6 +166,18 @@ export function ToolbarChamferIcon() {
 
 export function ToolbarFilletIcon() {
   return <ToolbarCommandImage file="toolbar-fillet.png" className="toolbar-user-art-icon" />;
+}
+
+export function ToolbarPaintIcon() {
+  return (
+    <svg viewBox="0 0 48 48" aria-hidden="true">
+      <path d="M18 40V27" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+      <path d="M18 28c0-7 3-10 10-10" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+      <rect x="26" y="11" width="14" height="8" rx="2.4" fill="none" stroke="currentColor" strokeWidth="2.7" />
+      <path d="M33 19v8h-7v5" fill="none" stroke="currentColor" strokeWidth="2.7" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M13 25h6" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+    </svg>
+  );
 }
 
 export function ToolbarPreserveEdgeIcon(props: IconProps) {

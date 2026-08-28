@@ -23,6 +23,7 @@ import {
 } from "@/lib/gearGeometry";
 import { displayStepFromMillimeters, displayToMillimeters, formatMeasurementNumber, lengthDisplayUnit, millimetersToDisplay, parseMeasurementInput } from "@/lib/measurementUnits";
 import { resizedShapeSize, shapeDepth, shapeHasTaper, shapeOverallFootprintDimensions, shapeTaperDimensions, shapeWidth } from "@/lib/workplaneShapes";
+import { BUILTIN_FONT_NAMES } from "@/lib/builtinFonts";
 import { normalizeSketchRevolveSettings } from "@/lib/sketchRevolve";
 import { MAX_HIGH_RESOLUTION_SIDES } from "@/lib/workplaneSettings";
 import type { GearType, GridSize, MeasurementAccuracy, WorkplaneShape, WorkplaneWorkspaceSettings } from "@/types/sketchforge";
@@ -59,7 +60,7 @@ const SOLID_COLORS = [
   "#4b5563",
   "#111111",
 ];
-const TEXT_FONT_OPTIONS = ["Multilanguage", "Sans", "Serif", "Script", "Monospace", "Rounded", "Stencil"];
+const FONT_UPLOAD_OPTION = "__upload_font__";
 const GEAR_TYPE_OPTIONS: Array<{ value: GearType; label: string }> = [
   { value: "spur", label: "Spur gear" },
   { value: "helical", label: "Helical gear" },
@@ -83,6 +84,15 @@ type TextPropertyConfig = {
   onChange: (value: string) => void;
 };
 
+type FontPropertyConfig = {
+  type: "font";
+  label: string;
+  value: string;
+  customFonts: Array<{ assetId: string; familyName: string }>;
+  onChange: (font: string) => void;
+  onImportFont: () => void;
+};
+
 type SelectPropertyConfig = {
   type: "select";
   label: string;
@@ -91,7 +101,7 @@ type SelectPropertyConfig = {
   onChange: (value: string) => void;
 };
 
-type ShapePropertyConfig = RangePropertyConfig | TextPropertyConfig | SelectPropertyConfig;
+type ShapePropertyConfig = RangePropertyConfig | TextPropertyConfig | SelectPropertyConfig | FontPropertyConfig;
 export type ShapeInspectorUpdateOptions = { resizeAxis?: "width" | "depth" | "height" };
 type ShapeInspectorUpdate = (patch: Partial<WorkplaneShape>, options?: ShapeInspectorUpdateOptions) => void;
 
@@ -108,7 +118,13 @@ function propertyUsesLengthUnit(label: string) {
   return ["Radius", "Length", "Width", "Height", "Bevel", "Top Radius", "Base Radius", "Thickness", "Tooth Size", "Tooth Width", "Center Hole", "Top Length", "Top Width", "Bottom Length", "Bottom Width"].includes(label);
 }
 
-function getShapePropertiesWithAppLimits(shape: WorkplaneShape, onUpdate: ShapeInspectorUpdate, textWidthMax = 260): ShapePropertyConfig[] {
+function getShapePropertiesWithAppLimits(
+  shape: WorkplaneShape,
+  onUpdate: ShapeInspectorUpdate,
+  textWidthMax = 260,
+  customFonts: Array<{ assetId: string; familyName: string }> = [],
+  onImportFont: () => void = () => {},
+): ShapePropertyConfig[] {
   const baseWidth = shapeWidth(shape);
   const baseDepth = shapeDepth(shape);
   const footprint = shapeOverallFootprintDimensions(shape);
@@ -338,7 +354,14 @@ function getShapePropertiesWithAppLimits(shape: WorkplaneShape, onUpdate: ShapeI
           onUpdate({ text: nextText, width: nextWidth, size: nextWidth });
         },
       },
-      { type: "select", label: "Font", value: shape.font ?? "Multilanguage", options: TEXT_FONT_OPTIONS, onChange: (font) => onUpdate({ font }) },
+      {
+        type: "font",
+        label: "Font",
+        value: shape.font ?? "Multilanguage",
+        customFonts,
+        onChange: (font) => onUpdate({ font }),
+        onImportFont,
+      },
       { label: "Height", value: shape.height, min: MIN_SHAPE_SIZE, max: 40, onChange: setHeight },
       { label: "Bevel", value: shape.bevel ?? 0, min: 0, max: 8, onChange: (bevel) => onUpdate({ bevel }) },
       { label: "Segments", value: shape.segments ?? 0, min: 0, max: 24, step: 1, onChange: (segments) => onUpdate({ segments: Math.round(segments) }) },
@@ -352,9 +375,9 @@ function getShapePropertiesWithAppLimits(shape: WorkplaneShape, onUpdate: ShapeI
   ];
 }
 
-function getShapeProperties(shape: WorkplaneShape, onUpdate: ShapeInspectorUpdate, workspace: WorkplaneWorkspaceSettings): ShapePropertyConfig[] {
+function getShapeProperties(shape: WorkplaneShape, onUpdate: ShapeInspectorUpdate, workspace: WorkplaneWorkspaceSettings, customFonts: Array<{ assetId: string; familyName: string }> = [], onImportFont: () => void = () => {}): ShapePropertyConfig[] {
   const customLimit = workspace.shapeCustomizations[shape.kind]?.maxDimension;
-  const properties = getShapePropertiesWithAppLimits(shape, onUpdate, customLimit ?? 260);
+  const properties = getShapePropertiesWithAppLimits(shape, onUpdate, customLimit ?? 260, customFonts, onImportFont);
   if (customLimit === undefined) return properties;
   return properties.map((property) => {
     if (property.type === "text" || property.type === "select") return property;
@@ -375,6 +398,8 @@ export function ShapeInspector({
   onEditSketch,
   canSeparateParts = false,
   onSeparateParts,
+  customFonts = [],
+  onImportFont,
   onInteractionActiveChange,
 }: {
   shape: WorkplaneShape;
@@ -387,11 +412,13 @@ export function ShapeInspector({
   onEditSketch?: () => void;
   canSeparateParts?: boolean;
   onSeparateParts?: () => void;
+  customFonts?: Array<{ assetId: string; familyName: string }>;
+  onImportFont?: () => void;
   onInteractionActiveChange?: (active: boolean) => void;
 }) {
   const solidColor = shape.color;
   const locked = Boolean(shape.locked);
-  const properties = getShapeProperties(shape, onUpdate, workspace);
+  const properties = getShapeProperties(shape, onUpdate, workspace, customFonts, onImportFont ?? (() => {}));
   const gearType = shape.kind === "gear" ? normalizeGearType(shape.gearType) : null;
   const primaryProperties = shape.kind === "gear"
     ? properties.filter((property) => ["Center Hole", "Length", "Width", "Height"].includes(property.label))
@@ -673,6 +700,9 @@ function ShapePropertyRows({
     if (property.type === "text") {
       return <TextProperty key={property.label} {...property} disabled={disabled} onInteractionActiveChange={onInteractionActiveChange} />;
     }
+    if (property.type === "font") {
+      return <FontProperty key={property.label} {...property} disabled={disabled} />;
+    }
     if (property.type === "select") {
       return <SelectProperty key={property.label} {...property} disabled={disabled} />;
     }
@@ -819,6 +849,50 @@ function TextProperty({ label, value, disabled, onChange, onInteractionActiveCha
         onBlur={() => onInteractionActiveChange?.(false)}
         onChange={(event) => onChange(event.currentTarget.value)}
       />
+    </label>
+  );
+}
+
+function FontProperty({ label, value, customFonts, disabled, onChange, onImportFont }: FontPropertyConfig & { disabled?: boolean }) {
+  const [displayValue, setDisplayValue] = useState(value);
+  useEffect(() => {
+    setDisplayValue(value);
+  }, [value]);
+  return (
+    <label className="select-property">
+      <span>{label}</span>
+      <select
+        value={displayValue}
+        disabled={disabled}
+        onChange={(event) => {
+          const next = event.currentTarget.value;
+          if (next === FONT_UPLOAD_OPTION) {
+            setDisplayValue(value);
+            onImportFont();
+            return;
+          }
+          setDisplayValue(next);
+          onChange(next);
+        }}
+      >
+        <optgroup label="Built-in">
+          {BUILTIN_FONT_NAMES.map((option) => (
+            <option key={option} value={option}>
+              {option}
+            </option>
+          ))}
+        </optgroup>
+        {customFonts.length ? (
+          <optgroup label="Uploaded">
+            {customFonts.map((font) => (
+              <option key={font.assetId} value={font.assetId}>
+                {font.familyName}
+              </option>
+            ))}
+          </optgroup>
+        ) : null}
+        <option value={FONT_UPLOAD_OPTION}>Upload font…</option>
+      </select>
     </label>
   );
 }

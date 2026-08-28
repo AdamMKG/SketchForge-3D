@@ -37,6 +37,9 @@ playwright-report/
 .codex-run/
 .codex-remote-attachments/
 
+# Scratch/debug scripts (not part of the app)
+/relief_debug4.mjs
+
 # OS/editor noise
 .DS_Store
 Thumbs.db

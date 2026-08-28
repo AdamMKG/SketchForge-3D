@@ -278,6 +278,7 @@ export function workplaneShapesEqual(a: WorkplaneShape, b: WorkplaneShape) {
     a.font === b.font &&
     a.importedMesh === b.importedMesh &&
     a.imagePlate === b.imagePlate &&
+    a.faceTextures === b.faceTextures &&
     a.sketchProfile === b.sketchProfile &&
     a.sketchOperation === b.sketchOperation &&
     a.sketchRevolve === b.sketchRevolve &&

@@ -1,8 +1,27 @@
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { sha256Hex } from "@/lib/projectAssets";
+import { projectAssetIdsInShapes, sha256Hex, sourceFormatForFileName } from "@/lib/projectAssets";
+import type { WorkplaneShape } from "@/types/sketchforge";
 
 const utf8 = new TextEncoder();
+
+function textShape(id: string, font: string): WorkplaneShape {
+  return {
+    id,
+    name: "Text",
+    kind: "text",
+    color: "#12a4cc",
+    x: 0,
+    z: 0,
+    size: 86,
+    width: 86,
+    depth: 28,
+    height: 10,
+    rotation: 0,
+    text: "HI",
+    font,
+  };
+}
 
 describe("project asset hashing", () => {
   afterEach(() => vi.unstubAllGlobals());
@@ -24,5 +43,35 @@ describe("project asset hashing", () => {
     const expected = createHash("sha256").update(bytes).digest("hex");
     vi.stubGlobal("crypto", {});
     await expect(sha256Hex(bytes)).resolves.toBe(expected);
+  });
+});
+
+describe("font file detection", () => {
+  it("maps font extensions to the typeface source format", () => {
+    expect(sourceFormatForFileName("Inter-Bold.ttf")).toBe("typeface");
+    expect(sourceFormatForFileName("font.OTF")).toBe("typeface");
+    expect(sourceFormatForFileName("hinted.woff2")).toBe("typeface");
+    expect(sourceFormatForFileName("catalog.woff")).toBe("typeface");
+    expect(sourceFormatForFileName("model.stl")).toBe("stl");
+    expect(sourceFormatForFileName("image.svg")).toBe("svg");
+    expect(sourceFormatForFileName("part.step")).toBe("step");
+    expect(sourceFormatForFileName("part.stp")).toBe("step");
+    expect(sourceFormatForFileName("document.pdf")).toBeNull();
+    expect(sourceFormatForFileName("no-extension")).toBeNull();
+  });
+
+  it("collects custom font asset ids from text shapes while skipping built-in fonts", () => {
+    const shapes: WorkplaneShape[] = [
+      textShape("custom-text", "asset-font-1"),
+      textShape("builtin-text", "Sans"),
+      {
+        ...textShape("default-text", undefined as unknown as string),
+        groupedShapes: [
+          textShape("nested-custom", "asset-font-2"),
+          textShape("nested-builtin", "Multilanguage"),
+        ],
+      },
+    ];
+    expect([...projectAssetIdsInShapes(shapes)]).toEqual(["asset-font-1", "asset-font-2"]);
   });
 });

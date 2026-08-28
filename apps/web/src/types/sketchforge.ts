@@ -28,7 +28,7 @@ export type ShapeAsset = {
   hole?: boolean;
 };
 
-export type ProjectAssetSourceFormat = "stl" | "obj" | "svg" | "step";
+export type ProjectAssetSourceFormat = "stl" | "obj" | "svg" | "step" | "typeface";
 
 export type ProjectAsset = {
   id: string;
@@ -179,6 +179,37 @@ export type CadDisplayEdge = {
   points: number[];
 };
 
+export type ShapeFaceId =
+  | "px"
+  | "nx"
+  | "py"
+  | "ny"
+  | "pz"
+  | "nz"
+  | "side"
+  | "top"
+  | "bottom"
+  | "surface"
+  | "dome"
+  | "front"
+  | "back"
+  | "left"
+  | "right"
+  | "slope"
+  | "frontSlope"
+  | "backSlope"
+  | "leftSlope"
+  | "rightSlope";
+
+export type ShapeFaceTexture = {
+  dataUrl: string;
+  mimeType: string;
+  pixelWidth: number;
+  pixelHeight: number;
+  useAsBump: boolean;
+  bumpScale: number;
+};
+
 export type CadBrepFrame = {
   x: number;
   z: number;
@@ -264,6 +295,10 @@ export type WorkplaneShape = {
     pixelWidth: number;
     pixelHeight: number;
   };
+  // Per-face texture + bump maps for primitive shapes. Faces are identified by
+  // the declarative face spec in lib/faceTextures.ts. Cleared whenever a
+  // geometry-changing edit (dimensions, rotation, kind, tessellation) occurs.
+  faceTextures?: Partial<Record<ShapeFaceId, ShapeFaceTexture>>;
   sketchProfile?: SketchProfile;
   sketchOperation?: SketchOperation;
   sketchRevolve?: SketchRevolveSettings;

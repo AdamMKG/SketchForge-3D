@@ -2,7 +2,7 @@ import { strFromU8, strToU8, unzip, zip, type AsyncZippable } from "fflate";
 import { editorHistoryEntry, hydrateEditorHistoryState, type EditorHistoryEntry } from "@/lib/editorHistory";
 import { normalizePlacementWorkplane, placementWorkplaneIsBase, type PlacementWorkplane } from "@/lib/placementWorkplane";
 import { importedShapeFromObj } from "@/lib/objImport";
-import { normalizeProjectAsset, sha256Hex } from "@/lib/projectAssets";
+import { normalizeProjectAsset, projectAssetIdsInShapes, sha256Hex } from "@/lib/projectAssets";
 import { canonicalizeShape } from "@/lib/workplaneShapes";
 import { importedShapeFromStl } from "@/lib/stlImport";
 import { importedShapeFromSvg } from "@/lib/svgImport";
@@ -413,14 +413,7 @@ function repairDuplicateGroupedObjectIds(shapes: WorkplaneShape[]) {
 }
 
 function referencedSourceAssetIds(states: WorkplaneShape[][]) {
-  const ids = new Set<string>();
-  const visit = (shape: WorkplaneShape) => {
-    if (shape.importedMesh?.assetId) ids.add(shape.importedMesh.assetId);
-    shape.groupedShapes?.forEach(visit);
-    shape.edgeTreatmentHistory?.forEach((entry) => visit(entry.before));
-  };
-  states.flat().forEach(visit);
-  return ids;
+  return projectAssetIdsInShapes(states.flat());
 }
 
 async function serializeShapeNode(
@@ -437,15 +430,32 @@ async function serializeShapeNode(
     cadBrep,
     imagePlate,
     sketchProfile,
+    faceTextures,
     ...baseDefinition
   } = canonicalizeShape(shape);
   const definition: Record<string, unknown> = { ...baseDefinition };
+
+  const font = baseDefinition.font;
+  if (font && builder.sourceIdMap.has(font)) {
+    definition.font = builder.sourceIdMap.get(font);
+  }
 
   if (imagePlate) {
     const { dataUrl, ...plateDefinition } = imagePlate;
     const decoded = decodeDataUrl(dataUrl);
     const asset = await builder.addAsset("image", decoded.bytes, decoded.mediaType, { fileName: `${shape.name}-image` });
     definition.imagePlate = { ...plateDefinition, assetId: asset.id };
+  }
+
+  if (faceTextures && Object.keys(faceTextures).length) {
+    const serialized: Record<string, unknown> = {};
+    for (const [faceId, texture] of Object.entries(faceTextures)) {
+      const { dataUrl, ...textureDefinition } = texture;
+      const decoded = decodeDataUrl(dataUrl);
+      const asset = await builder.addAsset("image", decoded.bytes, decoded.mediaType, { fileName: `${shape.name}-${faceId}-texture` });
+      serialized[faceId] = { ...textureDefinition, assetId: asset.id };
+    }
+    definition.faceTextures = serialized;
   }
 
   if (sketchProfile) {
@@ -971,7 +981,7 @@ async function validateDocumentAndAssets(raw: unknown, files: ArchiveFiles) {
     if (bytes.byteLength !== asset.byteLength) throw new Error(`Asset '${asset.path}' has an invalid size`);
     const hash = await sha256Hex(bytes);
     if (hash !== asset.sha256) throw new Error(`Asset '${asset.path}' failed its integrity check`);
-    if (asset.kind === "source" && !["stl", "obj", "svg", "step"].includes(asset.sourceFormat ?? "")) {
+    if (asset.kind === "source" && !["stl", "obj", "svg", "step", "typeface"].includes(asset.sourceFormat ?? "")) {
       throw new Error(`Source asset '${id}' has an unknown source format`);
     }
     assetById.set(id, asset);
@@ -1095,6 +1105,17 @@ async function restoreShapeFromNode(
         return { ...rest, dataUrl: bytesToDataUrl(files[record.path], record.mediaType) };
       }),
     };
+  }
+  const serializedFaceTextures = definition.faceTextures as Record<string, Record<string, unknown> & { assetId?: string }> | undefined;
+  if (serializedFaceTextures) {
+    const restored: Record<string, unknown> = {};
+    for (const [faceId, texture] of Object.entries(serializedFaceTextures)) {
+      const record = texture.assetId ? assetById.get(texture.assetId) : undefined;
+      if (!record || record.kind !== "image") throw new Error(`Object '${node.objectId}' has a missing face texture asset`);
+      const { assetId: _assetId, ...rest } = texture;
+      restored[faceId] = { ...rest, dataUrl: bytesToDataUrl(files[record.path], record.mediaType) };
+    }
+    definition.faceTextures = restored;
   }
 
   let importedMesh: WorkplaneShape["importedMesh"];

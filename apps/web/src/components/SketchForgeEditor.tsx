@@ -8,13 +8,7 @@ import { ADDITION, Brush, Evaluator, HOLLOW_INTERSECTION, HOLLOW_SUBTRACTION, IN
 import * as THREE from "three";
 import { TextGeometry } from "three/examples/jsm/geometries/TextGeometry.js";
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
-import { FontLoader, type Font, type FontData } from "three/examples/jsm/loaders/FontLoader.js";
-import droidMonoFontJson from "three/examples/fonts/droid/droid_sans_mono_regular.typeface.json";
-import droidSansBoldFontJson from "three/examples/fonts/droid/droid_sans_bold.typeface.json";
-import droidSerifBoldFontJson from "three/examples/fonts/droid/droid_serif_bold.typeface.json";
-import gentilisBoldFontJson from "three/examples/fonts/gentilis_bold.typeface.json";
-import helvetikerBoldFontJson from "three/examples/fonts/helvetiker_bold.typeface.json";
-import optimerBoldFontJson from "three/examples/fonts/optimer_bold.typeface.json";
+import { resolveTextFont } from "@/lib/textFonts";
 import type { AppThemePreference, ResolvedAppTheme } from "@/lib/appTheme";
 import type { ChallengeTutorialId } from "@/lib/challenges";
 import { manifoldModuleSource } from "@/generated/manifoldModuleSource";
@@ -27,6 +21,7 @@ import {
   ToolbarChamferIcon,
   ToolbarCaretDownIcon,
   ToolbarCopyIcon,
+  ToolbarDistributeIcon,
   ToolbarDuplicateIcon,
   ToolbarDropToWorkplaneIcon,
   ToolbarExportIcon,
@@ -37,6 +32,7 @@ import {
   ToolbarIntersectionIcon,
   ToolbarFilletIcon,
   ToolbarMirrorIcon,
+  ToolbarPaintIcon,
   ToolbarPasteIcon,
   ToolbarRedoIcon,
   ToolbarSnapGridIcon,
@@ -46,10 +42,14 @@ import {
   ToolbarUngroupIcon,
   ToolbarUndoIcon,
   ToolbarVectorExportIcon,
+  ToolbarWorkplaneIcon,
 } from "./icons";
 import { WorkplaneViewport } from "./WorkplaneViewport";
 import { SketchWorkspace, type SketchMeasurement, type SketchPrimitive, type SketchSelection, type SketchTool } from "./SketchWorkspace";
 import { EdgeModifierPanel } from "./workplane/EdgeModifierPanel";
+import { TexturePanel } from "./workplane/TexturePanel";
+import { DistributeModal } from "./workplane/DistributeModal";
+import { distributionCloneShapes, distributionTileBounds, type DistributionOptions } from "@/lib/shapeDistribution";
 import {
   canonicalizeShape,
   cloneWorkplaneShapeTreeWithFreshIds,
@@ -93,6 +93,8 @@ import { rotateSketchPoints, selectedClosedSketchPoints } from "@/lib/sketchRota
 import { PROJECT_THUMBNAIL_IDLE_MS, projectThumbnailSceneChanged, type ProjectThumbnailSceneKey } from "@/lib/projectThumbnail";
 import { importedShapeFromObj } from "@/lib/objImport";
 import { attachProjectAsset, dedupeProjectAssets, projectAssetFromBytes, sourceFormatForFileName } from "@/lib/projectAssets";
+import { faceLabelForId, hasFaceTextures, isFaceTextureSupportedKind } from "@/lib/faceTextures";
+import { applyReliefToGeometry, reliefSampleFromImage, type ReliefSample } from "@/lib/textureRelief";
 import { findSketchOutlineIntersection } from "@/lib/sketchProfileValidation";
 import { addLineIntersectionPoints, splitSketchSegment } from "@/lib/sketchPointRefinement";
 import { buildSketchRevolveMesh, DEFAULT_SKETCH_REVOLVE_SETTINGS, normalizeSketchRevolveSettings, type SketchRevolveMesh } from "@/lib/sketchRevolve";
@@ -101,6 +103,7 @@ import { makeShapeFromAsset, sceneShape, toolbarShapeAssets, type ToolbarShapeAs
 import { importExtensionSupported } from "@/lib/importExtensions";
 import { importedShapeFromStl } from "@/lib/stlImport";
 import { exportMeshesToStl } from "@/lib/stlExport";
+import { isBuiltinFontName, parseTypefaceFont, registerCustomFont, unregisterCustomFont } from "@/lib/textFonts";
 import { importedShapeFromSvg, invalidSvgMeshReason } from "@/lib/svgImport";
 import { toSvgProjection, type SvgProjectionLayer } from "@/lib/svgExport";
 import { normalizeSnapGrid, normalizeWorkspaceSettings, workplaneSettingsFingerprint } from "@/lib/workplaneSettings";
@@ -126,13 +129,18 @@ import {
 } from "@/lib/sketchforgeMcpProtocol";
 import type { CadModifierComponentMesh, CadModifierDisplayEdge, CadModifierEdge, CadModifierKind, CadModifierMeshPart, CadModifierPrimitivePart, CadModifierQuality, CadModifierWorkerRequest, CadModifierWorkerResponse } from "@/lib/cadModifierTypes";
 import type { SketchCadBuildResponse } from "@/lib/sketchCadTypes";
-import type { AlignAxis, AlignHandleStatus, AlignTarget, GridSize, ProjectAsset, ShapeAsset, SketchImage, SketchOperation, SketchPoint, SketchProfile, SketchRevolveSettings, SketchSegment, WorkplaneShape, WorkplaneWorkspaceSettings } from "@/types/sketchforge";
+import type { AlignAxis, AlignHandleStatus, AlignTarget, GridSize, ProjectAsset, ShapeAsset, ShapeFaceId, ShapeFaceTexture, SketchImage, SketchOperation, SketchPoint, SketchProfile, SketchRevolveSettings, SketchSegment, WorkplaneShape, WorkplaneWorkspaceSettings } from "@/types/sketchforge";
 
 export { importedShapeFromObj, importedShapeFromStl, importedShapeFromSvg };
 
 type TopPanel = "import" | "export" | "profile" | "settings" | null;
 type ExportFormat = "stl" | "obj" | "step" | "svg" | "skf";
 type DirectExportFormat = Exclude<ExportFormat, "step" | "skf">;
+type ExportReliefOptions = {
+  relief: boolean;
+  depthMm: number;
+  detail: number;
+};
 type SkfHistoryLimit = EditorHistoryExportLimit;
 type SkfExportTarget = "download" | "shared";
 type ToolbarMode = "geometry" | "sketch";
@@ -158,6 +166,41 @@ type EdgeModifierSession = {
   preview: WorkplaneShape | null;
   componentPreviews: EdgeModifierComponentPreview[];
 };
+
+type TextureSession = {
+  shapeId: string;
+  faceId: ShapeFaceId | null;
+};
+
+// Shape edits that regenerate geometry; per-face textures cannot survive them
+// because the face structure of the rebuilt geometry may change.
+const FACE_TEXTURE_INVALIDATING_KEYS: Array<keyof WorkplaneShape> = [
+  "kind",
+  "width",
+  "depth",
+  "height",
+  "size",
+  "radius",
+  "steps",
+  "sides",
+  "bevel",
+  "segments",
+  "topRadius",
+  "baseRadius",
+  "teeth",
+  "toothSize",
+  "toothWidth",
+  "centerHoleSize",
+  "gearType",
+  "helixAngle",
+  "helixQuality",
+  "text",
+  "font",
+  "edgeTreatments",
+  "groupedShapes",
+  "groupOperation",
+  "sketchRevolve",
+];
 
 type EdgeModifierComponentPreview = {
   owner: number;
@@ -233,16 +276,6 @@ const COPLANAR_BOOLEAN_RESCUE_DEGREES = 0.02;
 const NORMAL_SELECTION_CAD_EDGE_MIN_ANGLE = 60;
 const MIN_EDGE_MODIFIER_AMOUNT = 0.001;
 const SEPARATE_PARTS_VERTEX_TOLERANCE = 0.0005;
-const booleanFontLoader = new FontLoader();
-const booleanTextFonts: Record<string, Font> = {
-  Multilanguage: booleanFontLoader.parse(helvetikerBoldFontJson as FontData),
-  Sans: booleanFontLoader.parse(droidSansBoldFontJson as FontData),
-  Serif: booleanFontLoader.parse(droidSerifBoldFontJson as FontData),
-  Script: booleanFontLoader.parse(gentilisBoldFontJson as FontData),
-  Monospace: booleanFontLoader.parse(droidMonoFontJson as FontData),
-  Rounded: booleanFontLoader.parse(optimerBoldFontJson as FontData),
-  Stencil: booleanFontLoader.parse(helvetikerBoldFontJson as FontData),
-};
 let manifoldRuntimePromise: Promise<ManifoldToplevel> | null = null;
 
 function emptySketchProfile(): SketchProfile {
@@ -2124,10 +2157,10 @@ function createBooleanTextGeometry(shape: WorkplaneShape) {
   const bevel = clampNumber(shape.bevel ?? 0, 0, 8);
   const fontName = shape.font ?? "Multilanguage";
   const geometry = new TextGeometry(text, {
-    font: booleanTextFonts[fontName] ?? booleanTextFonts.Multilanguage,
+    font: resolveTextFont(shape),
     size: 20,
     depth: shape.height,
-    curveSegments: fontName === "Stencil" ? 1 : 8,
+    curveSegments: isBuiltinFontName(fontName) && fontName === "Stencil" ? 1 : 8,
     bevelEnabled: bevel > 0,
     bevelThickness: bevel * 0.22,
     bevelSize: bevel * 0.16,
@@ -2156,54 +2189,50 @@ function createBooleanTextGeometry(shape: WorkplaneShape) {
   return geometry;
 }
 
-function geometryMeshForShape(shape: WorkplaneShape): MeshData | null {
+function buildExportGeometry(shape: WorkplaneShape): THREE.BufferGeometry | null {
   const width = shapeWidth(shape);
   const depth = shapeDepth(shape);
   const height = shape.height;
   const size = Math.min(width, depth);
-  let geometry: THREE.BufferGeometry | null = null;
 
   switch (shape.kind) {
     case "box":
-      geometry = shape.radius && shape.radius > 0
+      return shape.radius && shape.radius > 0
         ? new RoundedBoxGeometry(width, height, depth, Math.max(1, shape.steps ?? 10), shape.radius)
         : new THREE.BoxGeometry(width, height, depth);
-      break;
     case "cylinder":
-      geometry = new THREE.CylinderGeometry(1, 1, height, shape.sides ?? 96, shape.segments ?? 1);
-      geometry.scale(width / 2, 1, depth / 2);
-      break;
-    case "sphere":
-      geometry = new THREE.SphereGeometry(1, sphereTessellation(shape.steps).widthSegments, sphereTessellation(shape.steps).heightSegments);
+      return geometryWithScale(
+        new THREE.CylinderGeometry(1, 1, height, shape.sides ?? 96, shape.segments ?? 1),
+        width / 2,
+        1,
+        depth / 2,
+      );
+    case "sphere": {
+      const geometry = new THREE.SphereGeometry(1, sphereTessellation(shape.steps).widthSegments, sphereTessellation(shape.steps).heightSegments);
       geometry.scale(width / 2, height / 2, depth / 2);
-      break;
+      return geometry;
+    }
     case "cone": {
       const baseRadius = shape.baseRadius ?? width / 2;
-      geometry = new THREE.CylinderGeometry(shape.topRadius ?? 0, baseRadius, height, shape.sides ?? 96);
+      const geometry = new THREE.CylinderGeometry(shape.topRadius ?? 0, baseRadius, height, shape.sides ?? 96);
       geometry.scale(1, 1, depth / Math.max(0.001, width));
-      break;
+      return geometry;
     }
     case "pyramid":
-      geometry = createBooleanPyramidGeometry(width, height, depth, shape.sides ?? 4);
-      break;
+      return createBooleanPyramidGeometry(width, height, depth, shape.sides ?? 4);
     case "roof":
-      geometry = createBooleanRoofGeometry(width, height, depth);
-      break;
+      return createBooleanRoofGeometry(width, height, depth);
     case "roundRoof":
-      geometry = createBooleanRoundRoofGeometry(width, height, depth, shape.sides ?? 64);
-      break;
+      return createBooleanRoundRoofGeometry(width, height, depth, shape.sides ?? 64);
     case "halfSphere":
-      geometry = createBooleanHalfSphereGeometry(width, height, depth, shape.steps ?? 32);
-      break;
+      return createBooleanHalfSphereGeometry(width, height, depth, shape.steps ?? 32);
     case "torus":
-      geometry = createBooleanTorusGeometry(width, height, depth);
-      break;
+      return createBooleanTorusGeometry(width, height, depth);
     case "ring":
     case "tube":
-      geometry = createBooleanHollowCylinderGeometry(width, height, depth, shape.bevel ?? 4, 144);
-      break;
+      return createBooleanHollowCylinderGeometry(width, height, depth, shape.bevel ?? 4, 144);
     case "gear":
-      geometry = createGearGeometry({
+      return createGearGeometry({
         width,
         depth,
         height,
@@ -2215,32 +2244,106 @@ function geometryMeshForShape(shape: WorkplaneShape): MeshData | null {
         helixAngle: shape.helixAngle,
         helixQuality: shape.helixQuality,
       });
-      break;
     case "wedge":
-      geometry = createBooleanWedgeGeometry(width, height, depth);
-      break;
+      return createBooleanWedgeGeometry(width, height, depth);
     case "polygon":
-      geometry = new THREE.CylinderGeometry(1, 1, height, 6);
-      geometry.scale(width / 2, 1, depth / 2);
-      break;
+      return geometryWithScale(
+        new THREE.CylinderGeometry(1, 1, height, 6),
+        width / 2,
+        1,
+        depth / 2,
+      );
     case "icosahedron":
-      geometry = new THREE.IcosahedronGeometry(size / 2, 1);
-      geometry.translate(0, height / 2, 0);
-      break;
+      return geometryWithTranslate(new THREE.IcosahedronGeometry(size / 2, 1), 0, height / 2, 0);
     case "text":
-      geometry = createBooleanTextGeometry(shape);
-      break;
+      return createBooleanTextGeometry(shape);
     case "scribble":
-      geometry = new THREE.TorusKnotGeometry(size * 0.22, size * 0.055, 120, 12);
-      geometry.translate(0, height / 2, 0);
-      break;
+      return geometryWithTranslate(new THREE.TorusKnotGeometry(size * 0.22, size * 0.055, 120, 12), 0, height / 2, 0);
     case "sketch":
     default:
-      geometry = new THREE.BoxGeometry(size, Math.max(3, height * 0.35), size * 0.72);
-      break;
+      return new THREE.BoxGeometry(size, Math.max(3, height * 0.35), size * 0.72);
+  }
+}
+
+function geometryWithScale(geometry: THREE.BufferGeometry, x: number, y: number, z: number) {
+  geometry.scale(x, y, z);
+  return geometry;
+}
+
+function geometryWithTranslate(geometry: THREE.BufferGeometry, x: number, y: number, z: number) {
+  geometry.translate(x, y, z);
+  return geometry;
+}
+
+function geometryMeshForShape(shape: WorkplaneShape): MeshData | null {
+  const geometry = buildExportGeometry(shape);
+  return geometry ? bufferGeometryToMeshData(sanitizeName(shape.name), geometry) : null;
+}
+
+const reliefSampleCache = new Map<string, Promise<ReliefSample>>();
+
+function reliefSampleForImage(dataUrl: string): Promise<ReliefSample> {
+  let promise = reliefSampleCache.get(dataUrl);
+  if (!promise) {
+    promise = reliefSampleFromImage(dataUrl).catch((error: unknown) => {
+      reliefSampleCache.delete(dataUrl);
+      throw error;
+    });
+    reliefSampleCache.set(dataUrl, promise);
+  }
+  return promise;
+}
+
+function shapeNeedsRelief(shape: WorkplaneShape): boolean {
+  if (hasFaceTextures(shape)) return true;
+  return Boolean(shape.groupedShapes?.some((child) => shapeNeedsRelief(child)));
+}
+
+async function reliefMeshForShape(shape: WorkplaneShape, depthMm: number, detail: number): Promise<MeshData | null> {
+  if (shape.kind === "mesh" && shape.importedMesh) {
+    return meshForShape(shape);
+  }
+  if (shape.groupedShapes?.length) {
+    const vertices: Vec3[] = [];
+    const faces: [number, number, number][] = [];
+    for (const child of shape.groupedShapes.filter((childShape) => !childShape.hidden)) {
+      const childMesh = shapeNeedsRelief(child) ? await reliefMeshForShape(child, depthMm, detail) : meshForShape(child);
+      if (childMesh) appendMeshData(vertices, faces, childMesh);
+    }
+    return transformMesh({ name: sanitizeName(shape.name), vertices, faces }, shape);
   }
 
-  return geometry ? bufferGeometryToMeshData(sanitizeName(shape.name), geometry) : null;
+  const geometry = buildExportGeometry(shape);
+  if (!geometry) return null;
+
+  const texturedIds = Object.entries(shape.faceTextures ?? {})
+    .filter(([, texture]) => Boolean(texture?.dataUrl))
+    .map(([id]) => id as ShapeFaceId);
+  if (texturedIds.length === 0) {
+    geometry.dispose();
+    return null;
+  }
+
+  const sampleByUrl = new Map<string, ReliefSample>();
+  for (const id of texturedIds) {
+    const texture = shape.faceTextures?.[id];
+    if (!texture?.dataUrl || sampleByUrl.has(texture.dataUrl)) continue;
+    sampleByUrl.set(texture.dataUrl, await reliefSampleForImage(texture.dataUrl));
+  }
+
+  const prepared = applyReliefToGeometry(
+    geometry,
+    shape,
+    { depthMm, detail },
+    (face) => {
+      const texture = shape.faceTextures?.[face.id as ShapeFaceId];
+      if (!texture?.dataUrl) return null;
+      return sampleByUrl.get(texture.dataUrl) ?? null;
+    },
+  );
+
+  const mesh = bufferGeometryToMeshData(sanitizeName(shape.name), prepared);
+  return transformMesh(mesh, shape);
 }
 
 function meshForShape(shape: WorkplaneShape): MeshData {
@@ -5490,11 +5593,15 @@ export function SketchForgeEditor({
   const [alignPreview, setAlignPreview] = useState<{ axis: AlignAxis; target: AlignTarget } | null>(null);
   const [mirrorMode, setMirrorMode] = useState(false);
   const [mirrorPreviewAxis, setMirrorPreviewAxis] = useState<AlignAxis | null>(null);
+  const [distributeOpen, setDistributeOpen] = useState(false);
+  const [distributePreview, setDistributePreview] = useState<DistributionOptions | null>(null);
   const [activeMode, setActiveMode] = useState("3D Design");
   const [notice, setNotice] = useState("Ready");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const projectFileInputRef = useRef<HTMLInputElement | null>(null);
   const sketchImageInputRef = useRef<HTMLInputElement | null>(null);
+  const faceTextureInputRef = useRef<HTMLInputElement | null>(null);
+  const fontFileInputRef = useRef<HTMLInputElement | null>(null);
   const booleanAutomationRunRef = useRef<string | null>(null);
   const projectHydratingRef = useRef(false);
   const projectInteractionActiveRef = useRef(false);
@@ -5507,6 +5614,27 @@ export function SketchForgeEditor({
   const lastProjectSnapshotRef = useRef<ProjectThumbnailSceneKey | null>(null);
   const shapesRef = useRef(shapes);
   const projectAssetsRef = useRef(projectAssets);
+  const previouslyRegisteredFontsRef = useRef<Set<string>>(new Set());
+  const customFonts = useMemo(() => {
+    const currentIds = new Set<string>();
+    const fonts: Array<{ assetId: string; familyName: string }> = [];
+    for (const asset of projectAssets) {
+      if (asset.sourceFormat !== "typeface") continue;
+      currentIds.add(asset.id);
+      try {
+        const font = parseTypefaceFont(asset.bytes);
+        registerCustomFont(asset.id, font);
+        fonts.push({ assetId: asset.id, familyName: font.data.familyName });
+      } catch (error) {
+        console.warn("Ignoring unusable stored font asset", asset.id, error);
+      }
+    }
+    previouslyRegisteredFontsRef.current.forEach((assetId) => {
+      if (!currentIds.has(assetId)) unregisterCustomFont(assetId);
+    });
+    previouslyRegisteredFontsRef.current = currentIds;
+    return fonts;
+  }, [projectAssets]);
   const selectedIdsRef = useRef(selectedIds);
   const workspaceSettingsRef = useRef(workspaceSettings);
   const snapGridRef = useRef(snapGrid);
@@ -5545,6 +5673,7 @@ export function SketchForgeEditor({
   const [editingSketchShapeId, setEditingSketchShapeId] = useState<string | null>(null);
   const [edgeModifier, setEdgeModifier] = useState<EdgeModifierSession | null>(null);
   const edgeModifierRef = useRef<EdgeModifierSession | null>(null);
+  const [textureSession, setTextureSession] = useState<TextureSession | null>(null);
   const cadModifierWorkerRef = useRef<Worker | null>(null);
   const cadModifierPendingRef = useRef(new Map<number, {
     resolve: (message: CadModifierWorkerResponse) => void;
@@ -5922,7 +6051,7 @@ export function SketchForgeEditor({
     [alignAnchorId, selectedShapes],
   );
   const alignHandleStatuses = useMemo(() => (alignMode ? alignmentStatuses(selectedShapes, effectiveAlignAnchorId) : []), [alignMode, effectiveAlignAnchorId, selectedShapes]);
-  const viewportShapes = useMemo(
+const viewportShapes = useMemo(
     () =>
       edgeModifier?.preview && cadModifierBaseShapeRef.current
         ? shapes.map((shape) => shape.id === cadModifierBaseShapeRef.current?.id ? edgeModifier.preview as WorkplaneShape : shape)
@@ -5930,8 +6059,10 @@ export function SketchForgeEditor({
         ? alignedShapesForSelection(shapes, selectedIds, selectedShapes, effectiveAlignAnchorId, alignPreview.axis, alignPreview.target).nextShapes
         : mirrorMode && mirrorPreviewAxis
           ? mirroredShapesForSelection(shapes, selectedIds, selectedShapes, mirrorPreviewAxis).nextShapes
-          : shapes,
-    [alignMode, alignPreview, edgeModifier?.preview, effectiveAlignAnchorId, mirrorMode, mirrorPreviewAxis, selectedIds, selectedShapes, shapes],
+          : distributeOpen && distributePreview
+            ? [...shapes, ...distributionCloneShapes(selectedShapes, distributePreview)]
+            : shapes,
+    [alignMode, alignPreview, distributeOpen, distributePreview, edgeModifier?.preview, effectiveAlignAnchorId, mirrorMode, mirrorPreviewAxis, selectedIds, selectedShapes, shapes],
   );
   const sketchReferenceShapes = useMemo(
     () => sketchOperation === "revolve" || placementWorkplaneIsBase(activeSketchWorkplane)
@@ -7018,6 +7149,9 @@ export function SketchForgeEditor({
     (id: string, patch: ShapeUpdatePatch) => {
       const bakeTransform = Boolean(patch.bakeTransform);
       const cleanedPatch = cleanShapePatch(patch);
+      if (!("faceTextures" in cleanedPatch) && FACE_TEXTURE_INVALIDATING_KEYS.some((key) => key in cleanedPatch)) {
+        cleanedPatch.faceTextures = undefined;
+      }
       if (cleanedPatch.sketchRevolve) {
         const source = shapesRef.current.find((shape) => shape.id === id);
         if (source?.sketchOperation === "revolve" && source.sketchProfile) {
@@ -7093,6 +7227,43 @@ export function SketchForgeEditor({
     });
     commitShapes([...shapes, ...duplicates], duplicates.map((shape) => shape.id), `Duplicated ${duplicates.length} shape${duplicates.length === 1 ? "" : "s"}`);
   }, [commitShapes, hasSelection, selectedShapes, shapes]);
+
+  const toggleDistribute = useCallback(() => {
+    if (!hasSelection) {
+      setNotice("Select a shape first");
+      return;
+    }
+    setDistributeOpen((open) => {
+      const next = !open;
+      setDistributePreview(null);
+      if (next) {
+        setAlignMode(false);
+        setAlignAnchorId(null);
+        setAlignPreview(null);
+        setMirrorMode(false);
+        setMirrorPreviewAxis(null);
+      }
+      return next;
+    });
+  }, [hasSelection]);
+
+  const applyDistribute = useCallback(
+    (options: DistributionOptions) => {
+      if (!hasSelection) {
+        setNotice("Select a shape first");
+        return;
+      }
+      const clones = distributionCloneShapes(selectedShapes, options);
+      if (clones.length === 0) {
+        setNotice("Nothing to distribute");
+        return;
+      }
+      setDistributeOpen(false);
+      setDistributePreview(null);
+      commitShapes([...shapes, ...clones], clones.map((clone) => clone.id), `Distributed ${clones.length} copy${clones.length === 1 ? "" : "s"}`);
+    },
+    [commitShapes, hasSelection, selectedShapes, shapes],
+  );
 
   const copySelected = useCallback(() => {
     if (!hasSelection) {
@@ -7194,6 +7365,9 @@ export function SketchForgeEditor({
       if (next) {
         setMirrorMode(false);
         setMirrorPreviewAxis(null);
+        setDistributeOpen(false);
+        setDistributePreview(null);
+        setTextureSession(null);
       }
       setNotice(next ? "Align: choose a dot, or click a selected shape to anchor it" : "Align cancelled");
       return next;
@@ -7258,6 +7432,9 @@ export function SketchForgeEditor({
         setAlignMode(false);
         setAlignAnchorId(null);
         setAlignPreview(null);
+        setDistributeOpen(false);
+        setDistributePreview(null);
+        setTextureSession(null);
       }
       setNotice(next ? "Mirror: choose an axis arrow" : "Mirror cancelled");
       return next;
@@ -7386,6 +7563,9 @@ export function SketchForgeEditor({
     cadModifierSourcePartsRef.current = sourceParts;
     setAlignMode(false);
     setMirrorMode(false);
+    setDistributeOpen(false);
+    setDistributePreview(null);
+    setTextureSession(null);
     setEdgeModifier({
       kind,
       edges: [],
@@ -7423,6 +7603,125 @@ export function SketchForgeEditor({
     cadModifierPrepareRef.current = prepareRequestId;
     armCadModifierWatchdog(prepareRequestId, "prepare", cadModifierPrepareTimeoutMs(triangleCount));
   }, [armCadModifierWatchdog, invalidateCadModifierSession, postCadModifierRequest, selectedShape, selectedShapes.length]);
+
+  const cancelTextureSession = useCallback(() => {
+    setTextureSession(null);
+    setNotice("Face paint cancelled");
+  }, []);
+
+  const startTextureMode = useCallback(() => {
+    if (selectedShapes.length !== 1 || !selectedShape) {
+      setNotice("Select one shape to paint a face");
+      return;
+    }
+    if (selectedShape.locked || selectedShape.hole) {
+      setNotice("Unlock the shape before painting a face");
+      return;
+    }
+    if (!isFaceTextureSupportedKind(selectedShape.kind)) {
+      setNotice("Face painting is not available for this object");
+      return;
+    }
+    setAlignMode(false);
+    setAlignAnchorId(null);
+    setAlignPreview(null);
+    setMirrorMode(false);
+    setMirrorPreviewAxis(null);
+    setDistributeOpen(false);
+    setDistributePreview(null);
+    setWorkplaneMode(false);
+    invalidateCadModifierSession();
+    setTextureSession((current) => current ? null : { shapeId: selectedShape.id, faceId: null });
+    setNotice(edgeModifier ? "Face paint cancelled" : "Face paint: click a face of the highlighted object");
+  }, [edgeModifier, invalidateCadModifierSession, selectedShape, selectedShapes.length]);
+
+  const handleFacePicked = useCallback((shapeId: string, faceId: string) => {
+    const shape = shapes.find((entry) => entry.id === shapeId);
+    if (!shape || !isFaceTextureSupportedKind(shape.kind)) {
+      return;
+    }
+    setTextureSession({ shapeId, faceId: faceId as ShapeFaceId });
+    setSelectedIds([shapeId]);
+    selectedIdsRef.current = [shapeId];
+  }, [shapes]);
+
+  const clearFaceTexture = useCallback(
+    (shapeId: string, faceId: ShapeFaceId) => {
+      const current = shapes.find((shape) => shape.id === shapeId);
+      if (!current || !current.faceTextures) {
+        setNotice("This face has no texture");
+        return;
+      }
+      const next = { ...current.faceTextures };
+      delete next[faceId];
+      const patch = Object.keys(next).length ? { faceTextures: next } : { faceTextures: undefined as unknown as Partial<Record<ShapeFaceId, ShapeFaceTexture>> };
+      commitShapes(
+        shapes.map((shape) => shape.id === current.id ? { ...shape, ...patch } : shape),
+        [current.id],
+        `Cleared texture on ${faceLabelForId(faceId)} face of ${current.name}`,
+      );
+    },
+    [commitShapes, shapes],
+  );
+
+  const updateFaceTexture = useCallback(
+    (patch: Partial<ShapeFaceTexture>) => {
+      if (!textureSession?.faceId) {
+        setNotice("Click a face on the object first");
+        return;
+      }
+      const current = shapes.find((shape) => shape.id === textureSession.shapeId);
+      if (!current) {
+        setNotice("The object is no longer available");
+        return;
+      }
+      const nextTexture: ShapeFaceTexture | null = patch.dataUrl === undefined && !current.faceTextures?.[textureSession.faceId]
+        ? null
+        : {
+          dataUrl: current.faceTextures?.[textureSession.faceId]?.dataUrl ?? "",
+          mimeType: current.faceTextures?.[textureSession.faceId]?.mimeType ?? "",
+          pixelWidth: current.faceTextures?.[textureSession.faceId]?.pixelWidth ?? 0,
+          pixelHeight: current.faceTextures?.[textureSession.faceId]?.pixelHeight ?? 0,
+          useAsBump: false,
+          bumpScale: 0.05,
+          ...current.faceTextures?.[textureSession.faceId],
+          ...patch,
+        };
+      if (!nextTexture?.dataUrl) {
+        clearFaceTexture(textureSession.shapeId, textureSession.faceId);
+        return;
+      }
+      const faceTextures = { ...(current.faceTextures ?? {}), [textureSession.faceId]: nextTexture };
+      commitShapes(
+        shapes.map((shape) => shape.id === current.id ? { ...shape, faceTextures } : shape),
+        [current.id],
+        `Painted ${faceLabelForId(textureSession.faceId)} face of ${current.name}`,
+      );
+    },
+    [clearFaceTexture, commitShapes, shapes, textureSession],
+  );
+
+  const applyFaceTextureFile = useCallback(async (file: File) => {
+    if (!textureSession?.faceId) {
+      setNotice("Click a face on the object first");
+      return;
+    }
+    if (!file.type.startsWith("image/")) {
+      setNotice("Choose a PNG, JPG, WebP, GIF, or other image file");
+      return;
+    }
+    try {
+      const prepared = await prepareImportedImage(file);
+      updateFaceTexture({
+        dataUrl: prepared.dataUrl,
+        mimeType: prepared.mimeType,
+        pixelWidth: prepared.pixelWidth,
+        pixelHeight: prepared.pixelHeight,
+      });
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "The face texture could not be loaded");
+    }
+  }, [textureSession, updateFaceTexture]);
 
   const prepareCadModifierForMcp = useCallback(async (shape: WorkplaneShape, sharpAngle: number) => {
     if (shape.locked || shape.hole) {
@@ -8551,7 +8850,7 @@ export function SketchForgeEditor({
     void run();
   }, [commitShapes]);
 
-  const exportDesign = useCallback((format: DirectExportFormat, exportName: string) => {
+  const exportDesign = useCallback(async (format: DirectExportFormat, exportName: string, options?: ExportReliefOptions) => {
     const sourceShapes = hasSelection ? selectedShapes : shapes;
     const exportable = sourceShapes.filter((shape) => !shape.hole);
     if (exportable.length === 0) {
@@ -8582,7 +8881,19 @@ export function SketchForgeEditor({
         .catch((error: unknown) => failNotice("SVG", error));
       return;
     }
-    const meshes = exportable.map(meshForShape);
+    const relief = Boolean(options?.relief);
+    const reliefDepthMm = Math.max(0, options?.depthMm ?? 0.5);
+    const reliefDetail = Math.max(1, Math.min(10, Math.round(options?.detail ?? 5)));
+    const meshes: MeshData[] = [];
+    if (relief) {
+      setNotice("Carving face textures into the mesh…");
+      for (const shape of exportable) {
+        const mesh = shapeNeedsRelief(shape) ? await reliefMeshForShape(shape, reliefDepthMm, reliefDetail) : null;
+        meshes.push(mesh ?? meshForShape(shape));
+      }
+    } else {
+      exportable.forEach((shape) => meshes.push(meshForShape(shape)));
+    }
     if (format === "stl") {
       const blob = new Blob([exportMeshesToStl(meshes)], { type: "model/stl" });
       void downloadBlobFile(projectExportFileName(exportName, "stl"), blob)
@@ -8822,12 +9133,61 @@ export function SketchForgeEditor({
     setTopPanel(null);
   }, [commitShapes, onOpenSkfProjectFile]);
 
+  const importFontFiles = useCallback(async (files: File[]) => {
+    if (!files.length) return;
+    const sourceProjectId = projectInfoRef.current.projectId;
+    const importedAssets: ProjectAsset[] = [];
+    const failures: Array<{ fileName: string; reason: string }> = [];
+    for (let index = 0; index < files.length; index += 1) {
+      const file = files[index];
+      if (projectInfoRef.current.projectId !== sourceProjectId) {
+        setNotice(`Font import of ${files.length} files cancelled because the project changed`);
+        return;
+      }
+      if (sourceFormatForFileName(file.name) !== "typeface") {
+        failures.push({ fileName: file.name, reason: "Not a font file (expected TTF, OTF, WOFF, or WOFF2)" });
+        continue;
+      }
+      setNotice(`Converting ${file.name} for model text…`);
+      try {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const { convertFontFileToTypeface } = await import("@/lib/textFonts");
+        const { familyName, json } = await convertFontFileToTypeface(bytes, file.name);
+        const asset = await projectAssetFromBytes(familyName || file.name, "typeface", new TextEncoder().encode(json));
+        importedAssets.push(asset);
+      } catch (error) {
+        failures.push({
+          fileName: file.name,
+          reason: error instanceof Error ? error.message : "Could not read font file",
+        });
+      }
+    }
+    if (projectInfoRef.current.projectId !== sourceProjectId) {
+      setNotice(`Font import of ${files.length} files cancelled because the project changed`);
+      return;
+    }
+    if (!importedAssets.length) {
+      setNotice(files.length === 1 && failures[0] ? failures[0].reason : `Could not import any of the ${files.length} selected font files`);
+      return;
+    }
+    const nextAssets = dedupeProjectAssets([...projectAssetsRef.current, ...importedAssets]);
+    projectAssetsRef.current = nextAssets;
+    setProjectAssets(nextAssets);
+    setNotice(importedAssets.length === 1 ? `Font "${importedAssets[0].name}" is ready for model text` : `Imported ${importedAssets.length} model fonts`);
+  }, []);
+
+  const openFontPicker = useCallback(() => fontFileInputRef.current?.click(), []);
+
   const selectFiles = useCallback(
     (files: FileList | File[]) => {
       const selectedFiles = Array.from(files);
-      if (selectedFiles.length) void importFiles(selectedFiles);
+      if (!selectedFiles.length) return;
+      const fontFiles = selectedFiles.filter((file) => sourceFormatForFileName(file.name) === "typeface");
+      const otherFiles = selectedFiles.filter((file) => sourceFormatForFileName(file.name) !== "typeface");
+      if (fontFiles.length) void importFontFiles(fontFiles);
+      if (otherFiles.length) void importFiles(otherFiles);
     },
-    [importFiles],
+    [importFiles, importFontFiles],
   );
 
   const selectShape = useCallback((id: string | string[] | null, mode: "replace" | "toggle" = "replace") => {
@@ -9127,6 +9487,17 @@ export function SketchForgeEditor({
     ungroupSelected,
   ]);
 
+  const textureTarget = useMemo(() => {
+    if (!textureSession) return null;
+    const shape = shapes.find((entry) => entry.id === textureSession.shapeId);
+    if (!shape) return null;
+    const faceTexture = textureSession.faceId ? shape.faceTextures?.[textureSession.faceId] : undefined;
+    return {
+      shape,
+      faceTexture: faceTexture ?? null,
+    };
+  }, [shapes, textureSession]);
+
   return (
     <div className="sketchforge-editor">
       <SecondaryToolbar
@@ -9153,6 +9524,8 @@ export function SketchForgeEditor({
         canAlign={selectedShapes.length > 1}
         canEdgeModify={selectedShapes.length === 1 && Boolean(selectedShape && !selectedShape.locked && !selectedShape.hole)}
         edgeModifierKind={edgeModifier?.kind ?? null}
+        canPaint={selectedShapes.length === 1 && Boolean(selectedShape && !selectedShape.locked && !selectedShape.hole && isFaceTextureSupportedKind(selectedShape.kind))}
+        paintActive={Boolean(textureSession)}
         mirrorMode={mirrorMode}
         sketchActive={sketchActive}
         sketchOperation={sketchOperation}
@@ -9180,12 +9553,14 @@ export function SketchForgeEditor({
         onChamfer={() => edgeModifier?.kind === "chamfer" ? cancelEdgeModifier() : startEdgeModifier("chamfer")}
         onCopy={copySelected}
         onDelete={deleteSelected}
+        onDistribute={toggleDistribute}
         onDuplicate={duplicateSelected}
         onDropToWorkplane={dropSelectedToWorkplane}
         onGroup={groupSelected}
         onIntersect={intersectSelected}
         onFillet={() => edgeModifier?.kind === "fillet" ? cancelEdgeModifier() : startEdgeModifier("fillet")}
         onMirror={toggleMirrorMode}
+        onPaint={startTextureMode}
         onPaste={pasteShape}
         onRedo={redo}
         onSnap={snapSelected}
@@ -9193,6 +9568,9 @@ export function SketchForgeEditor({
         onToggleHidden={toggleHidden}
         onUngroup={ungroupSelected}
         onUndo={undo}
+        onWorkplaneTool={activateWorkplaneTool}
+        workplaneMode={workplaneMode}
+        distributeOpen={distributeOpen}
         onTopPanel={(panel) => {
           setTopPanel((current) => (current === panel ? null : panel));
           setMenuOpen(false);
@@ -9279,6 +9657,8 @@ export function SketchForgeEditor({
           canSeparateParts={canSeparateSelectedParts}
           onSeparateParts={separateSelectedParts}
           onUpdateShape={updateShape}
+          customFonts={customFonts}
+          onImportFont={openFontPicker}
           onWorkspaceSettingsChange={updateProjectWorkspaceSettings}
           onWorkplaneModeChange={closeViewportWorkplaneMode}
           modifierActive={Boolean(edgeModifier)}
@@ -9286,8 +9666,10 @@ export function SketchForgeEditor({
           modifierEdges={edgeModifier?.edges.filter((edge) => modifierAvailableEdgeIds.includes(edge.id)) ?? []}
           selectedModifierEdgeIds={edgeModifier?.selectedEdgeIds ?? []}
           onModifierEdgeToggle={toggleModifierEdge}
-          challengeTutorial={challengeTutorial}
+challengeTutorial={challengeTutorial}
           onChallengeTutorialFinish={onChallengeTutorialFinish}
+          textureMode={Boolean(textureSession)}
+          onFacePicked={handleFacePicked}
           themePreference={themePreference}
           resolvedTheme={resolvedTheme}
           onThemePreferenceChange={onThemePreferenceChange}
@@ -9343,6 +9725,31 @@ export function SketchForgeEditor({
           onCancel={cancelEdgeModifier}
         />
       ) : null}
+      {textureSession && textureTarget ? (
+        <TexturePanel
+          targetName={textureTarget.shape.name}
+          faceLabel={textureSession.faceId ? faceLabelForId(textureSession.faceId) : "Unpicked face"}
+          facePicked={Boolean(textureSession.faceId)}
+          texture={textureTarget.faceTexture}
+          onUpload={() => faceTextureInputRef.current?.click()}
+          onUseAsBumpChange={(useAsBump) => updateFaceTexture({ useAsBump })}
+          onBumpScaleChange={(bumpScale) => updateFaceTexture({ bumpScale })}
+          onClear={() => textureSession.faceId ? clearFaceTexture(textureSession.shapeId, textureSession.faceId) : setNotice("Click a face on the object first")}
+          onCancel={cancelTextureSession}
+        />
+      ) : null}
+      {distributeOpen ? (
+        <DistributeModal
+          sourceShapes={selectedShapes}
+          workspace={workspaceSettings}
+          onPreviewChange={setDistributePreview}
+          onApply={applyDistribute}
+          onCancel={() => {
+            setDistributeOpen(false);
+            setDistributePreview(null);
+          }}
+        />
+      ) : null}
       {topPanel ? (
         <TopActionPanel
           panel={topPanel}
@@ -9374,6 +9781,17 @@ export function SketchForgeEditor({
         }}
       />
       <input
+        ref={faceTextureInputRef}
+        className="hidden-file-input"
+        type="file"
+        accept="image/png,image/jpeg,image/webp,image/gif,image/bmp"
+        onChange={(event) => {
+          const file = event.currentTarget.files?.[0];
+          if (file) void applyFaceTextureFile(file);
+          event.currentTarget.value = "";
+        }}
+      />
+      <input
         ref={projectFileInputRef}
         className="hidden-file-input"
         type="file"
@@ -9395,6 +9813,18 @@ export function SketchForgeEditor({
             selectFiles(event.currentTarget.files);
           }
           event.currentTarget.value = "";
+        }}
+      />
+      <input
+        ref={fontFileInputRef}
+        className="hidden-file-input"
+        type="file"
+        multiple
+        accept=".ttf,.otf,.woff,.woff2"
+        onChange={(event) => {
+          const selected = Array.from(event.currentTarget.files ?? []);
+          event.currentTarget.value = "";
+          if (selected.length) void importFontFiles(selected);
         }}
       />
       <div className="editor-toast" role="status">
@@ -9455,6 +9885,8 @@ function SecondaryToolbar({
   canAlign,
   canEdgeModify,
   edgeModifierKind,
+  canPaint,
+  paintActive,
   canGroup,
   canIntersect,
   canRedo,
@@ -9485,12 +9917,14 @@ function SecondaryToolbar({
   onChamfer,
   onCopy,
   onDelete,
+  onDistribute,
   onDuplicate,
   onDropToWorkplane,
   onGroup,
   onIntersect,
   onFillet,
   onMirror,
+  onPaint,
   onPaste,
   onRedo,
   onSnap,
@@ -9498,6 +9932,9 @@ function SecondaryToolbar({
   onToggleHidden,
   onUngroup,
   onUndo,
+  onWorkplaneTool,
+  workplaneMode,
+  distributeOpen,
   onTopPanel,
   onAddShape,
 }: {
@@ -9510,6 +9947,8 @@ function SecondaryToolbar({
   canAlign: boolean;
   canEdgeModify: boolean;
   edgeModifierKind: CadModifierKind | null;
+  canPaint: boolean;
+  paintActive: boolean;
   canGroup: boolean;
   canIntersect: boolean;
   canRedo: boolean;
@@ -9520,6 +9959,8 @@ function SecondaryToolbar({
   hiddenShapeCount: number;
   selectionHidden: boolean;
   mirrorMode: boolean;
+  distributeOpen: boolean;
+  workplaneMode: boolean;
   sketchActive: boolean;
   sketchOperation: SketchOperation;
   sketchTool: SketchTool;
@@ -9540,12 +9981,14 @@ function SecondaryToolbar({
   onChamfer: () => void;
   onCopy: () => void;
   onDelete: () => void;
+  onDistribute: () => void;
   onDuplicate: () => void;
   onDropToWorkplane: () => void;
   onGroup: () => void;
   onIntersect: () => void;
   onFillet: () => void;
   onMirror: () => void;
+  onPaint: () => void;
   onPaste: () => void;
   onRedo: () => void;
   onSnap: () => void;
@@ -9553,6 +9996,7 @@ function SecondaryToolbar({
   onToggleHidden: () => void;
   onUngroup: () => void;
   onUndo: () => void;
+  onWorkplaneTool: () => void;
   onTopPanel: (panel: TopPanel) => void;
   onAddShape: (shape: ShapeAsset) => void;
 }) {
@@ -9719,8 +10163,11 @@ function SecondaryToolbar({
     { label: "Snap to grid", icon: ToolbarSnapGridIcon, action: onSnap, enabled: hasSelection },
     { label: "Chamfer", icon: ToolbarChamferIcon, action: onChamfer, enabled: canEdgeModify, active: edgeModifierKind === "chamfer" },
     { label: "Fillet", icon: ToolbarFilletIcon, action: onFillet, enabled: canEdgeModify, active: edgeModifierKind === "fillet" },
+    { label: "Paint", icon: ToolbarPaintIcon, action: onPaint, enabled: canPaint, active: paintActive },
   ];
   const arrangeTools = [
+{ label: "Distribute copies", icon: ToolbarDistributeIcon, action: onDistribute, enabled: hasSelection, active: distributeOpen },
+    { label: "Workplane", icon: ToolbarWorkplaneIcon, action: onWorkplaneTool, enabled: true, active: workplaneMode },
     { label: "Drop to workplane", icon: ToolbarDropToWorkplaneIcon, action: onDropToWorkplane, enabled: hasSelection },
   ];
   const renderToolButton = (tool: (typeof leftTools)[number] | (typeof visibilityTools)[number] | (typeof combineTools)[number] | (typeof modifyTools)[number] | (typeof arrangeTools)[number]) => {
@@ -10163,7 +10610,7 @@ function TopActionPanel({
   shapeCount: number;
   scopeLabel: "selected" | "total";
   onClose: () => void;
-  onExport: (format: DirectExportFormat, exportName: string) => void;
+  onExport: (format: DirectExportFormat, exportName: string, options?: ExportReliefOptions) => void;
   onExportSkf: (exportName: string, historyLimit: SkfHistoryLimit, target?: SkfExportTarget) => void;
   onExportStep: (exportName: string) => void;
   sharedProjectsEnabled: boolean;
@@ -10178,11 +10625,14 @@ function TopActionPanel({
   const [exportName, setExportName] = useState(projectName);
   const previousProjectNameRef = useRef(projectName);
   const [skfHistoryLimit, setSkfHistoryLimit] = useState<SkfHistoryLimit>("unlimited");
-  useEffect(() => {
+useEffect(() => {
     const previousProjectName = previousProjectNameRef.current;
     setExportName((current) => current === previousProjectName ? projectName : current);
     previousProjectNameRef.current = projectName;
   }, [projectName]);
+  const [reliefEnabled, setReliefEnabled] = useState(false);
+  const [reliefDepth, setReliefDepth] = useState(0.5);
+  const [reliefDetail, setReliefDetail] = useState(5);
   const skfHistoryLimits: readonly SkfHistoryLimit[] = ["unlimited", 100, 50, 30];
   const skfHistoryLimitIndex = skfHistoryLimits.indexOf(skfHistoryLimit);
   const title =
@@ -10225,7 +10675,7 @@ function TopActionPanel({
   const runSelectedExport = () => {
     if (exportFormat === "step") onExportStep(exportName);
     else if (exportFormat === "skf") onExportSkf(exportName, skfHistoryLimit);
-    else onExport(exportFormat, exportName);
+    else onExport(exportFormat, exportName, { relief: reliefEnabled, depthMm: reliefDepth, detail: reliefDetail });
   };
 
   return (
@@ -10315,6 +10765,58 @@ function TopActionPanel({
               ))}
             </div>
           </section>
+
+          {exportFormat === "stl" || exportFormat === "obj" ? (
+            <section className="export-setting-section export-relief-section">
+              <div className="export-section-heading">
+                <div>
+                  <strong>Texture relief</strong>
+                  <span>Carve painted face textures into the exported geometry</span>
+                </div>
+                <label className="export-relief-toggle">
+                  <input
+                    type="checkbox"
+                    checked={reliefEnabled}
+                    onChange={(event) => setReliefEnabled(event.currentTarget.checked)}
+                  />
+                  <span>Relief</span>
+                </label>
+              </div>
+              {reliefEnabled ? (
+                <div className="export-relief-controls">
+                  <label className="export-relief-control">
+                    <span>Depth</span>
+                    <input
+                      className="export-relief-range"
+                      type="range"
+                      min={0}
+                      max={2}
+                      step={0.05}
+                      value={reliefDepth}
+                      aria-label="Relief depth in millimeters"
+                      onChange={(event) => setReliefDepth(Number(event.currentTarget.value))}
+                    />
+                    <output>{reliefDepth.toFixed(2)} mm</output>
+                  </label>
+                  <label className="export-relief-control">
+                    <span>Detail</span>
+                    <input
+                      className="export-relief-range"
+                      type="range"
+                      min={1}
+                      max={10}
+                      step={1}
+                      value={reliefDetail}
+                      aria-label="Relief mesh detail"
+                      onChange={(event) => setReliefDetail(Number(event.currentTarget.value))}
+                    />
+                    <output>{reliefDetail}</output>
+                  </label>
+                  <p className="export-relief-hint">Bright areas of the texture are raised above dark areas by up to the depth.</p>
+                </div>
+              ) : null}
+            </section>
+          ) : null}
 
           {exportFormat === "skf" ? (
             <section className="export-setting-section skf-history-section">

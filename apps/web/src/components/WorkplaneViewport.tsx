@@ -11,13 +11,7 @@ import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
 import { LineSegmentsGeometry } from "three/examples/jsm/lines/LineSegmentsGeometry.js";
 import { TextGeometry } from "three/examples/jsm/geometries/TextGeometry.js";
-import { FontLoader, type Font, type FontData } from "three/examples/jsm/loaders/FontLoader.js";
-import droidMonoFontJson from "three/examples/fonts/droid/droid_sans_mono_regular.typeface.json";
-import droidSansBoldFontJson from "three/examples/fonts/droid/droid_sans_bold.typeface.json";
-import droidSerifBoldFontJson from "three/examples/fonts/droid/droid_serif_bold.typeface.json";
-import gentilisBoldFontJson from "three/examples/fonts/gentilis_bold.typeface.json";
-import helvetikerBoldFontJson from "three/examples/fonts/helvetiker_bold.typeface.json";
-import optimerBoldFontJson from "three/examples/fonts/optimer_bold.typeface.json";
+import { getCustomFontsVersion, isBuiltinFontName, resolveTextFont } from "@/lib/textFonts";
 import { AlignOverlay, MirrorOverlay, type AlignOverlayState, type MirrorOverlayState } from "@/components/workplane/ActionOverlays";
 import { MoveDimensionOverlay } from "@/components/workplane/MoveDimensionOverlay";
 import { ShapeInspector, SnapGridControl, type ShapeInspectorUpdateOptions } from "@/components/workplane/ShapeInspector";
@@ -70,8 +64,20 @@ import {
   type TransformHandleKind,
   type TransformOverlayState,
 } from "@/components/workplane/TransformOverlay";
-import type { AlignAxis, AlignHandleStatus, AlignTarget, GridSize, MeasurementAccuracy, ShapeAsset, WorkplaneShape, WorkplaneWorkspaceSettings } from "@/types/sketchforge";
+import type { AlignAxis, AlignHandleStatus, AlignTarget, GridSize, MeasurementAccuracy, ShapeAsset, ShapeFaceId, ShapeFaceTexture, WorkplaneShape, WorkplaneWorkspaceSettings } from "@/types/sketchforge";
 import type { CadModifierEdge } from "@/lib/cadModifierTypes";
+import {
+  applyFaceTexturesToGeometry,
+  computeShapeFaces,
+  faceIdForNormal,
+  faceTextureGeometryToken,
+  faceTextureMaterialToken,
+  faceTextureRepeat,
+  hasFaceTextures,
+  isFaceTextureSupportedKind,
+  pickPlaneBasis,
+  type ShapeFace,
+} from "@/lib/faceTextures";
 
 const WORKPLANE_WIDTH = 200;
 const WORKPLANE_DEPTH = 140;
@@ -117,16 +123,6 @@ const SHAPE_KINDS = new Set<ShapeAsset["kind"]>([
   "icosahedron",
   "mesh",
 ]);
-const fontLoader = new FontLoader();
-const textFonts: Record<string, Font> = {
-  Multilanguage: fontLoader.parse(helvetikerBoldFontJson as FontData),
-  Sans: fontLoader.parse(droidSansBoldFontJson as FontData),
-  Serif: fontLoader.parse(droidSerifBoldFontJson as FontData),
-  Script: fontLoader.parse(gentilisBoldFontJson as FontData),
-  Monospace: fontLoader.parse(droidMonoFontJson as FontData),
-  Rounded: fontLoader.parse(optimerBoldFontJson as FontData),
-  Stencil: fontLoader.parse(helvetikerBoldFontJson as FontData),
-};
 const importedGeometryCache = new WeakMap<
   NonNullable<WorkplaneShape["importedMesh"]>,
   { geometry: THREE.BufferGeometry; edges: Map<number, THREE.EdgesGeometry> }
@@ -207,6 +203,8 @@ type WorkplaneViewportProps = {
   canSeparateParts?: boolean;
   onSeparateParts?: () => void;
   onUpdateShape: (id: string, patch: ShapeUpdatePatch) => void;
+  customFonts?: Array<{ assetId: string; familyName: string }>;
+  onImportFont?: () => void;
   onWorkspaceSettingsChange?: (settings: { workspace: WorkplaneWorkspaceSettings; snap: GridSize }) => void;
   onWorkplaneModeChange: (active: boolean) => void;
   modifierActive?: boolean;
@@ -214,8 +212,10 @@ type WorkplaneViewportProps = {
   modifierEdges?: CadModifierEdge[];
   selectedModifierEdgeIds?: number[];
   onModifierEdgeToggle?: (id: number, singleEdge: boolean) => void;
-  challengeTutorial?: ChallengeTutorialId | null;
+challengeTutorial?: ChallengeTutorialId | null;
   onChallengeTutorialFinish?: () => void;
+  textureMode?: boolean;
+  onFacePicked?: (shapeId: string, faceId: string) => void;
   themePreference?: AppThemePreference;
   resolvedTheme?: ResolvedAppTheme;
   onThemePreferenceChange?: (preference: AppThemePreference) => void;
@@ -895,6 +895,10 @@ function shapeTransformSignature(shape: WorkplaneShape) {
 }
 
 function shapeMaterialSignature(shape: WorkplaneShape): string {
+  return `${shapeMaterialBaseSignature(shape)}|ft:${faceTextureMaterialToken(shape)}`;
+}
+
+function shapeMaterialBaseSignature(shape: WorkplaneShape): string {
   return JSON.stringify({
     color: shape.color,
     hole: Boolean(shape.hole),
@@ -910,6 +914,10 @@ function shapeMaterialSignature(shape: WorkplaneShape): string {
 }
 
 function shapeGeometrySignature(shape: WorkplaneShape): string {
+  return `${shapeGeometryBaseSignature(shape)}|ft:${faceTextureGeometryToken(shape)}`;
+}
+
+function shapeGeometryBaseSignature(shape: WorkplaneShape): string {
   const taper = shape.kind === "gear" || !shapeHasTaper(shape)
     ? null
     : { ...shapeTaperDimensions(shape), baseWidth: shapeWidth(shape), baseDepth: shapeDepth(shape) };
@@ -956,6 +964,8 @@ function shapeGeometrySignature(shape: WorkplaneShape): string {
     return JSON.stringify({ kind: "polygon", taper });
   }
 
+  const customFontVersion = shape.kind === "text" && !isBuiltinFontName(shape.font) ? getCustomFontsVersion() : null;
+
   return JSON.stringify({
     kind: shape.kind,
     geometryRevision: shape.kind === "pyramid" ? 2 : undefined,
@@ -984,6 +994,7 @@ function shapeGeometrySignature(shape: WorkplaneShape): string {
     helixQuality: shape.helixQuality,
     text: shape.text,
     font: shape.font,
+    customFontVersion,
   });
 }
 
@@ -2323,6 +2334,8 @@ export function WorkplaneViewport({
   canSeparateParts = false,
   onSeparateParts,
   onUpdateShape,
+  customFonts = [],
+  onImportFont,
   onWorkspaceSettingsChange,
   onWorkplaneModeChange,
   modifierActive = false,
@@ -2330,8 +2343,10 @@ export function WorkplaneViewport({
   modifierEdges = [],
   selectedModifierEdgeIds = [],
   onModifierEdgeToggle,
-  challengeTutorial = null,
+challengeTutorial = null,
   onChallengeTutorialFinish,
+  textureMode = false,
+  onFacePicked,
   themePreference = "system",
   resolvedTheme = "light",
   onThemePreferenceChange,
@@ -2406,6 +2421,7 @@ export function WorkplaneViewport({
   const modifierActiveRef = useRef(modifierActive);
   const modifierPreviewActiveRef = useRef(modifierPreviewActive);
   const modifierEdgesRef = useRef(modifierEdges);
+  const textureModeRef = useRef(textureMode);
   const [hoverModifierEdgeId, setHoverModifierEdgeId] = useState<number | null>(null);
   const selectedIdsKeyRef = useRef(selectedIds.join("|"));
   const placementWorkplaneRef = useRef(placementWorkplane);
@@ -2708,6 +2724,10 @@ export function WorkplaneViewport({
     );
     if (threeRef.current) threeRef.current.needsRender = true;
   }, [modifierActive, renderSelectionIds]);
+
+  useEffect(() => {
+    textureModeRef.current = textureMode;
+  }, [textureMode]);
 
   useEffect(() => {
     modifierPreviewActiveRef.current = modifierPreviewActive;
@@ -3991,9 +4011,10 @@ export function WorkplaneViewport({
     return nearestId;
   }, []);
 
-  const pickPlacementSurface = useCallback((clientX: number, clientY: number, reverse: boolean) => {
+const pickPlacementSurface = useCallback((clientX: number, clientY: number, reverse: boolean) => {
     const state = threeRef.current;
     if (!state) return null;
+
     const rect = state.renderer.domElement.getBoundingClientRect();
     state.pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
     state.pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
@@ -4053,6 +4074,56 @@ export function WorkplaneViewport({
     };
   }, []);
 
+  const pickFace = useCallback((clientX: number, clientY: number) => {
+    const state = threeRef.current;
+    if (!state) {
+      return null;
+    }
+
+    const rect = state.renderer.domElement.getBoundingClientRect();
+    state.pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    state.pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+    state.raycaster.setFromCamera(state.pointer, state.camera);
+    state.raycaster.layers.set(RENDER_LAYER_SHAPES);
+
+    const intersections = state.raycaster.intersectObjects(state.shapeLayer.children, true);
+    const hit = intersections.find((entry) => typeof entry.object.userData.shapeId === "string");
+    if (!hit) {
+      return null;
+    }
+
+    const shapeId = hit.object.userData.shapeId as string;
+    const geometry = (hit.object as THREE.Mesh).geometry;
+    let faces = geometry.userData.shapeFaces as ShapeFace[] | undefined;
+    if (!faces?.length) {
+      const shape = shapesRef.current.find((entry) => entry.id === shapeId);
+      if (!shape) return null;
+      faces = computeShapeFaces(shape, geometry);
+    }
+    if (!faces.length || typeof hit.faceIndex !== "number") {
+      return null;
+    }
+
+    const triangle = hit.faceIndex;
+    const face = faces.find((candidate) => {
+      if (triangle >= candidate.triangleStart && triangle < candidate.triangleStart + candidate.triangleCount) {
+        return true;
+      }
+      return candidate.triangles.includes(triangle);
+    });
+    if (face) {
+      return { shapeId, faceId: face.id };
+    }
+
+    if (hit.face) {
+      const normal = hit.face.normal.clone();
+      if (normal.lengthSq() < 1e-9) return null;
+      return { shapeId, faceId: faceIdForNormal(normal) };
+    }
+
+    return null;
+  }, []);
+
   const pickModifierEdge = useCallback((clientX: number, clientY: number) => {
     const state = threeRef.current;
     if (!state) return null;
@@ -4110,6 +4181,13 @@ export function WorkplaneViewport({
         event.preventDefault();
         const edgeId = pickModifierEdge(event.clientX, event.clientY);
         if (edgeId !== null) onModifierEdgeToggle?.(edgeId, event.shiftKey);
+        return;
+      }
+
+      if (textureModeRef.current) {
+        event.preventDefault();
+        const picked = pickFace(event.clientX, event.clientY);
+        if (picked) onFacePicked?.(picked.shapeId, picked.faceId);
         return;
       }
 
@@ -5047,7 +5125,7 @@ export function WorkplaneViewport({
             onPointerCancel={finishDrag}
             onPointerLeave={handlePointerLeave}
           />
-          {!workplaneMode && marqueeRect ? <div className="selection-marquee" style={marqueeRect} /> : null}
+{!workplaneMode && !textureMode && marqueeRect ? <div className="selection-marquee" style={marqueeRect} /> : null}
           {!workplaneMode && moveDimensionsEnabled && moveDimensionOverlay ? (
             <MoveDimensionOverlay
               overlay={moveDimensionOverlay}
@@ -5055,7 +5133,7 @@ export function WorkplaneViewport({
               onCommit={commitMoveDimension}
             />
           ) : null}
-          {!workplaneMode && transformOverlay && !alignMode && !mirrorMode && !rulerMode && !rulerDeleteMode && !rulerMoveMode && !modifierActive ? (
+          {!workplaneMode && transformOverlay && !alignMode && !mirrorMode && !rulerMode && !rulerDeleteMode && !rulerMoveMode && !modifierActive && !textureMode ? (
             <TransformOverlay
               box={transformOverlay}
               measureKey={pinnedMeasureKey ?? hoverMeasureKey}
@@ -5103,7 +5181,7 @@ export function WorkplaneViewport({
         </div>
       </section>
 
-      {selectedShape && !modifierActive && !rulerMode && !rulerDeleteMode && !rulerMoveMode ? (
+      {selectedShape && !modifierActive && !textureMode && !rulerMode && !rulerDeleteMode && !rulerMoveMode ? (
         <ShapeInspector
           shape={selectedShape}
           snap={snap}
@@ -5118,6 +5196,8 @@ export function WorkplaneViewport({
           onEditSketch={selectedShape.sketchProfile ? onEditSketch : undefined}
           canSeparateParts={canSeparateParts}
           onSeparateParts={onSeparateParts}
+          customFonts={customFonts}
+          onImportFont={onImportFont}
           onInteractionActiveChange={onInteractionActiveChange}
         />
       ) : null}
@@ -6003,9 +6083,11 @@ function syncShapeObjectAppearance(object: THREE.Group, shape: WorkplaneShape, s
   if (!surface) return;
   if (updateSurfaceMaterial) {
     const material = sharedShapeMaterial(shape);
-    const nextMaterial = shape.kind === "box" && shape.imagePlate && !shape.hole
-      ? createImagePlateMaterials(shape, material, onTextureReady)
-      : material;
+    const nextMaterial = hasFaceTextures(shape)
+      ? createFaceTextureMaterials(shape, surface.geometry, material, onTextureReady)
+      : shape.kind === "box" && shape.imagePlate && !shape.hole
+        ? createImagePlateMaterials(shape, material, onTextureReady)
+        : material;
     const currentMaterials = Array.isArray(surface.material) ? surface.material : null;
     const sameMaterial = Array.isArray(nextMaterial)
       ? Boolean(currentMaterials && nextMaterial.every((entry, index) => currentMaterials[index] === entry))
@@ -7091,14 +7173,18 @@ function createRotateArc(center: THREE.Vector3, radius: number, start: number, e
   return new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), material);
 }
 
-function sharedShapeGeometry(key: string, create: () => THREE.BufferGeometry) {
+function shapeGeometryCacheKey(shape: WorkplaneShape) {
+  return `${shapeGeometrySignature(shape)}|faceTextures:${faceTextureGeometryToken(shape)}`;
+}
+
+function sharedShapeGeometry(shape: WorkplaneShape, key: string, create: () => THREE.BufferGeometry) {
   const cached = sharedShapeGeometryCache.get(key);
   if (cached) {
     sharedShapeGeometryCache.delete(key);
     sharedShapeGeometryCache.set(key, cached);
     return cached.geometry;
   }
-  const geometry = putGeometryOnBase(create());
+  const geometry = putGeometryOnBase(applyFaceTexturesToGeometry(create(), shape));
   geometry.userData.cached = true;
   geometry.userData.sharedShapeGeometryKey = key;
   sharedShapeGeometryCache.set(key, { geometry, users: 0 });
@@ -7301,13 +7387,14 @@ function createShapeObject(
   const depth = shapeDepth(shape);
   const size = Math.min(width, depth);
   const height = shape.height;
-  const geometryCacheKey = shapeGeometrySignature(shape);
+  const geometryCacheKey = shapeGeometryCacheKey(shape);
 
   switch (shape.kind) {
     case "box":
       addMesh(
         group,
         sharedShapeGeometry(
+          shape,
           geometryCacheKey,
           () => shape.radius && shape.radius > 0
             ? new RoundedBoxGeometry(width, height, depth, Math.max(1, shape.steps ?? 10), shape.radius)
@@ -7318,50 +7405,52 @@ function createShapeObject(
         undefined,
         undefined,
         shape.radius && shape.radius > 0 ? undefined : new THREE.Vector3(width, height, depth),
+        onTextureReady,
       );
       break;
     case "cylinder":
-      addMesh(group, sharedShapeGeometry(geometryCacheKey, () => new THREE.CylinderGeometry(1, 1, 1, shape.sides ?? 96, shape.segments ?? 1)), material, shape, undefined, undefined, new THREE.Vector3(width / 2, height, depth / 2));
+      addMesh(group, sharedShapeGeometry(shape, geometryCacheKey, () => new THREE.CylinderGeometry(1, 1, 1, shape.sides ?? 96, shape.segments ?? 1)), material, shape, undefined, undefined, new THREE.Vector3(width / 2, height, depth / 2), onTextureReady);
       break;
     case "sphere": {
       const { widthSegments, heightSegments } = sphereTessellation(shape.steps);
-      addMesh(group, sharedShapeGeometry(geometryCacheKey, () => new THREE.SphereGeometry(1, widthSegments, heightSegments)), material, shape, undefined, undefined, new THREE.Vector3(width / 2, height / 2, depth / 2));
+      addMesh(group, sharedShapeGeometry(shape, geometryCacheKey, () => new THREE.SphereGeometry(1, widthSegments, heightSegments)), material, shape, undefined, undefined, new THREE.Vector3(width / 2, height / 2, depth / 2), onTextureReady);
       break;
     }
     case "cone":
       addMesh(
         group,
-        sharedShapeGeometry(geometryCacheKey, () => new THREE.CylinderGeometry(shape.topRadius ?? 0, shape.baseRadius ?? width / 2, height, shape.sides ?? 96)),
+        sharedShapeGeometry(shape, geometryCacheKey, () => new THREE.CylinderGeometry(shape.topRadius ?? 0, shape.baseRadius ?? width / 2, height, shape.sides ?? 96)),
         material,
         shape,
         undefined,
         undefined,
         new THREE.Vector3(1, 1, depth / Math.max(0.001, width)),
+        onTextureReady,
       );
       break;
     case "pyramid":
-      addMesh(group, sharedShapeGeometry(geometryCacheKey, () => createPyramidGeometry(width, height, depth, shape.sides ?? 4)), material, shape);
+      addMesh(group, sharedShapeGeometry(shape, geometryCacheKey, () => createPyramidGeometry(width, height, depth, shape.sides ?? 4)), material, shape, undefined, undefined, undefined, onTextureReady);
       break;
     case "roof":
-      addMesh(group, sharedShapeGeometry(geometryCacheKey, () => createRoofGeometry(width, height, depth)), material, shape);
+      addMesh(group, sharedShapeGeometry(shape, geometryCacheKey, () => createRoofGeometry(width, height, depth)), material, shape, undefined, undefined, undefined, onTextureReady);
       break;
     case "roundRoof":
-      addMesh(group, sharedShapeGeometry(geometryCacheKey, () => createRoundRoofGeometry(width, height, depth, shape.sides ?? 64)), material, shape);
+      addMesh(group, sharedShapeGeometry(shape, geometryCacheKey, () => createRoundRoofGeometry(width, height, depth, shape.sides ?? 64)), material, shape, undefined, undefined, undefined, onTextureReady);
       break;
     case "halfSphere":
-      addMesh(group, sharedShapeGeometry(geometryCacheKey, () => createHalfSphereGeometry(width, height, depth, shape.steps ?? 32)), material, shape);
+      addMesh(group, sharedShapeGeometry(shape, geometryCacheKey, () => createHalfSphereGeometry(width, height, depth, shape.steps ?? 32)), material, shape, undefined, undefined, undefined, onTextureReady);
       break;
     case "torus":
-      addMesh(group, sharedShapeGeometry(geometryCacheKey, () => createTorusGeometry(width, height, depth)), material, shape);
+      addMesh(group, sharedShapeGeometry(shape, geometryCacheKey, () => createTorusGeometry(width, height, depth)), material, shape, undefined, undefined, undefined, onTextureReady);
       break;
     case "ring":
-      addMesh(group, sharedShapeGeometry(geometryCacheKey, () => createHollowCylinderGeometry(width, height, depth, shape.bevel ?? 4, 144)), material, shape);
+      addMesh(group, sharedShapeGeometry(shape, geometryCacheKey, () => createHollowCylinderGeometry(width, height, depth, shape.bevel ?? 4, 144)), material, shape, undefined, undefined, undefined, onTextureReady);
       break;
     case "tube":
-      addMesh(group, sharedShapeGeometry(geometryCacheKey, () => createHollowCylinderGeometry(width, height, depth, shape.bevel ?? 4, 144)), material, shape);
+      addMesh(group, sharedShapeGeometry(shape, geometryCacheKey, () => createHollowCylinderGeometry(width, height, depth, shape.bevel ?? 4, 144)), material, shape, undefined, undefined, undefined, onTextureReady);
       break;
     case "gear":
-      addMesh(group, sharedShapeGeometry(geometryCacheKey, () => createGearGeometry({
+      addMesh(group, sharedShapeGeometry(shape, geometryCacheKey, () => createGearGeometry({
         width,
         depth,
         height,
@@ -7372,19 +7461,19 @@ function createShapeObject(
         gearType: shape.gearType,
         helixAngle: shape.helixAngle,
         helixQuality: shape.helixQuality,
-      })), material, shape);
+      })), material, shape, undefined, undefined, undefined, onTextureReady);
       break;
     case "wedge":
-      addMesh(group, sharedShapeGeometry(geometryCacheKey, () => createWedgeGeometry(width, height, depth)), material, shape);
+      addMesh(group, sharedShapeGeometry(shape, geometryCacheKey, () => createWedgeGeometry(width, height, depth)), material, shape, undefined, undefined, undefined, onTextureReady);
       break;
     case "polygon":
-      addMesh(group, sharedShapeGeometry(geometryCacheKey, () => new THREE.CylinderGeometry(1, 1, 1, 6)), material, shape, undefined, undefined, new THREE.Vector3(width / 2, height, depth / 2));
+      addMesh(group, sharedShapeGeometry(shape, geometryCacheKey, () => new THREE.CylinderGeometry(1, 1, 1, 6)), material, shape, undefined, undefined, new THREE.Vector3(width / 2, height, depth / 2), onTextureReady);
       break;
     case "icosahedron":
-      addMesh(group, sharedShapeGeometry(geometryCacheKey, () => new THREE.IcosahedronGeometry(size / 2, 1)), material, shape);
+      addMesh(group, sharedShapeGeometry(shape, geometryCacheKey, () => new THREE.IcosahedronGeometry(size / 2, 1)), material, shape, undefined, undefined, undefined, onTextureReady);
       break;
     case "text":
-      addTextShape(group, material, shape, geometryCacheKey);
+      addTextShape(group, material, shape, geometryCacheKey, onTextureReady);
       break;
     case "mesh":
       if (shape.importedMesh) {
@@ -7401,17 +7490,18 @@ function createShapeObject(
             height / Math.max(0.001, shape.importedMesh.baseHeight),
             depth / Math.max(0.001, shape.importedMesh.baseDepth),
           ),
+          onTextureReady,
         );
       } else {
-        addMesh(group, sharedShapeGeometry(geometryCacheKey, () => new THREE.BoxGeometry(size, Math.max(3, height * 0.35), size * 0.72)), material, shape);
+        addMesh(group, sharedShapeGeometry(shape, geometryCacheKey, () => new THREE.BoxGeometry(size, Math.max(3, height * 0.35), size * 0.72)), material, shape, undefined, undefined, undefined, onTextureReady);
       }
       break;
     case "scribble":
-      addMesh(group, sharedShapeGeometry(geometryCacheKey, () => new THREE.TorusKnotGeometry(size * 0.22, size * 0.055, 120, 12)), material, shape);
+      addMesh(group, sharedShapeGeometry(shape, geometryCacheKey, () => new THREE.TorusKnotGeometry(size * 0.22, size * 0.055, 120, 12)), material, shape, undefined, undefined, undefined, onTextureReady);
       break;
     case "sketch":
     default:
-      addMesh(group, sharedShapeGeometry(geometryCacheKey, () => new THREE.BoxGeometry(size, Math.max(3, height * 0.35), size * 0.72)), material, shape);
+      addMesh(group, sharedShapeGeometry(shape, geometryCacheKey, () => new THREE.BoxGeometry(size, Math.max(3, height * 0.35), size * 0.72)), material, shape, undefined, undefined, undefined, onTextureReady);
       break;
   }
 
@@ -7535,6 +7625,64 @@ function applyGroupedContentTaper(content: THREE.Group, shape: WorkplaneShape, b
   });
 }
 
+function createFaceTextureMaterials(
+  shape: WorkplaneShape,
+  geometry: THREE.BufferGeometry,
+  baseMaterial: THREE.Material | THREE.Material[],
+  onTextureReady?: () => void,
+) {
+  const base = (Array.isArray(baseMaterial) ? baseMaterial[0] : baseMaterial) as THREE.MeshStandardMaterial;
+  const faces = (geometry.userData.shapeFaces as ShapeFace[] | undefined) ?? computeShapeFaces(shape, geometry);
+  if (!faces.length) return base;
+  let anyTextured = false;
+  const materials = faces.map((face) => {
+    const faceTexture = shape.faceTextures?.[face.id as ShapeFaceId];
+    if (!faceTexture?.dataUrl) return base;
+    anyTextured = true;
+    return createFaceTextureMaterial(shape, geometry, face, faceTexture, base, onTextureReady);
+  });
+  return anyTextured ? materials : base;
+}
+
+function createFaceTextureMaterial(
+  shape: WorkplaneShape,
+  geometry: THREE.BufferGeometry,
+  face: ShapeFace,
+  faceTexture: ShapeFaceTexture,
+  base: THREE.MeshStandardMaterial,
+  onTextureReady?: () => void,
+) {
+  const material = new THREE.MeshStandardMaterial();
+  material.copy(base);
+  material.userData = {};
+  const repeat = faceTextureRepeat(shape, geometry, face);
+  if (faceTexture.dataUrl) {
+    const map = imageTextureLoader.load(faceTexture.dataUrl, () => {
+      map.needsUpdate = true;
+      material.needsUpdate = true;
+      onTextureReady?.();
+    });
+    map.colorSpace = THREE.SRGBColorSpace;
+    map.wrapS = THREE.RepeatWrapping;
+    map.wrapT = THREE.RepeatWrapping;
+    map.repeat.copy(repeat);
+    map.anisotropy = 4;
+    material.map = map;
+  }
+  if (faceTexture.useAsBump && faceTexture.dataUrl) {
+    const bumpMap = imageTextureLoader.load(faceTexture.dataUrl, () => {
+      bumpMap.needsUpdate = true;
+      material.needsUpdate = true;
+      onTextureReady?.();
+    });
+    bumpMap.wrapS = THREE.RepeatWrapping;
+    bumpMap.wrapT = THREE.RepeatWrapping;
+    bumpMap.repeat.copy(repeat);
+    material.bumpMap = bumpMap;
+    material.bumpScale = faceTexture.bumpScale ?? 0.05;
+  }
+  return material;
+}
 function addMesh(
   group: THREE.Group,
   geometry: THREE.BufferGeometry,
@@ -7543,13 +7691,15 @@ function addMesh(
   position?: THREE.Vector3,
   rotation?: THREE.Euler,
   scale?: THREE.Vector3,
+  onTextureReady?: () => void,
 ) {
-  const based = geometry.userData.cached ? geometry : putGeometryOnBase(geometry);
+const based = geometry.userData.cached ? geometry : putGeometryOnBase(geometry);
   const prepared = taperGeometryForShape(based, shape);
-  const mesh = new THREE.Mesh(prepared, material);
+  const meshMaterial = hasFaceTextures(shape) ? createFaceTextureMaterials(shape, prepared, material, onTextureReady) : material;
+  const mesh = new THREE.Mesh(prepared, meshMaterial);
   mesh.userData.shapeSurface = true;
   retainSharedShapeGeometry(mesh, prepared);
-  retainSharedShapeMaterials(mesh, material);
+  retainSharedShapeMaterials(mesh, meshMaterial);
   if (group.userData.acceleratedPicking !== false && !shape.edgeTreatments?.length) {
     enableAcceleratedMeshPicking(mesh, prepared, Boolean(shape.importedMesh));
   }
@@ -7680,16 +7830,16 @@ function setComplexEdgeVisibility(object: THREE.Object3D, visible: boolean) {
   });
 }
 
-function addTextShape(group: THREE.Group, material: THREE.MeshStandardMaterial, shape: WorkplaneShape, geometryCacheKey: string) {
-  const geometry = sharedShapeGeometry(geometryCacheKey, () => {
+function addTextShape(group: THREE.Group, material: THREE.MeshStandardMaterial, shape: WorkplaneShape, geometryCacheKey: string, onTextureReady?: () => void) {
+  const geometry = sharedShapeGeometry(shape, geometryCacheKey, () => {
     const text = (shape.text ?? "TEXT").trim() || " ";
     const bevel = clamp(shape.bevel ?? 0, 0, 8);
     const fontName = shape.font ?? "Multilanguage";
     const next = new TextGeometry(text, {
-      font: textFonts[fontName] ?? textFonts.Multilanguage,
+      font: resolveTextFont(shape),
       size: 20,
       depth: shape.height,
-      curveSegments: fontName === "Stencil" ? 1 : 8,
+      curveSegments: isBuiltinFontName(fontName) && fontName === "Stencil" ? 1 : 8,
       bevelEnabled: bevel > 0,
       bevelThickness: bevel * 0.22,
       bevelSize: bevel * 0.16,
@@ -7717,7 +7867,7 @@ function addTextShape(group: THREE.Group, material: THREE.MeshStandardMaterial, 
     }
     return next;
   });
-  addMesh(group, geometry, material, shape);
+  addMesh(group, geometry, material, shape, undefined, undefined, undefined, onTextureReady);
 }
 
 function putGeometryOnBase(geometry: THREE.BufferGeometry) {
