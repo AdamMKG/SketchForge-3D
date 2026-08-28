@@ -19,6 +19,7 @@ import {
   shapeDepth,
   shapeHasTaper,
   shapeOverallFootprintDimensions,
+  shapeTransformShouldRemainEditable,
   shapeTaperDimensions,
   shapeTaperScaleAt,
   shapeWidth,
@@ -127,6 +128,29 @@ describe("workplane shape helpers", () => {
     expect(canonical.mirrorY).toBe(true);
     expect(canonical.groupedShapes?.[0].rotation).toBe(0);
     expect(canonical.groupedShapes?.[0].mirrorZ).toBeUndefined();
+  });
+
+  it("keeps rotated groups editable so they can still be ungrouped", () => {
+    const child = shape({ id: "child" });
+    const group = shape({
+      id: "group",
+      kind: "mesh",
+      rotation: 45,
+      groupedBaseWidth: 20,
+      groupedBaseDepth: 20,
+      groupedBaseHeight: 20,
+      groupedShapes: [child],
+    });
+
+    expect(shapeTransformShouldRemainEditable(group)).toBe(true);
+    expect(shapeTransformShouldRemainEditable(shape({ rotation: 45 }))).toBe(false);
+    expect(canonicalizeShape(group)).toMatchObject({
+      rotation: 45,
+      groupedBaseWidth: 20,
+      groupedBaseDepth: 20,
+      groupedBaseHeight: 20,
+      groupedShapes: [{ id: "child" }],
+    });
   });
 
   it("assigns fresh object IDs throughout duplicated group trees", () => {

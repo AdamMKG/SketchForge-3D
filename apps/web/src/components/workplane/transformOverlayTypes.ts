@@ -15,6 +15,65 @@ export type RotationPlaneView = {
 
 export type RotationPlaneBasis = Pick<RotationPlaneView, "a" | "b" | "c" | "d">;
 
+export const ROTATION_WHEEL_SNAP_DEGREES = 45;
+export const ROTATION_WHEEL_SHIFT_SNAP_DEGREES = 22.5;
+
+export function rotationWheelDirectionSign(screenSign: number) {
+  return screenSign < 0 ? 1 : -1;
+}
+
+export function snappedRotationDelta(rawDelta: number, insideSnapWheel: boolean, shiftKey: boolean) {
+  const step = insideSnapWheel || shiftKey ? ROTATION_WHEEL_SNAP_DEGREES : 1;
+  return Math.round(rawDelta / step) * step;
+}
+
+export function snappedWheelRotation(
+  pointerAngle: number,
+  startPointerAngle: number,
+  screenSign = 1,
+  snapDegrees = ROTATION_WHEEL_SNAP_DEGREES,
+) {
+  const snappedPointerAngle = Math.round(pointerAngle / snapDegrees) * snapDegrees;
+  const snappedStartPointerAngle = Math.round(startPointerAngle / snapDegrees) * snapDegrees;
+  let pointerDelta = snappedPointerAngle - snappedStartPointerAngle;
+  while (pointerDelta > 180) pointerDelta -= 360;
+  while (pointerDelta <= -180) pointerDelta += 360;
+  const direction = screenSign < 0 ? -1 : 1;
+  const delta = pointerDelta * direction;
+  return {
+    delta: delta === 0 ? 0 : delta,
+    pointerAngle: snappedPointerAngle,
+  };
+}
+
+export function continuousSnappedWheelRotation(
+  rotation: { delta: number; pointerAngle: number },
+  snapDegrees: number,
+  previousSnapDegrees: number | undefined,
+  previousDelta: number | undefined,
+  previousPointerAngle: number | undefined,
+  previousDeltaOffset = 0,
+  previousPointerOffset = 0,
+) {
+  const snapModeChanged = previousSnapDegrees !== undefined && previousSnapDegrees !== snapDegrees;
+  const deltaOffset = snapModeChanged && previousDelta !== undefined
+    ? previousDelta - rotation.delta
+    : previousDeltaOffset;
+  const pointerOffset = snapModeChanged && previousPointerAngle !== undefined
+    ? previousPointerAngle - rotation.pointerAngle
+    : previousPointerOffset;
+  let pointerAngle = rotation.pointerAngle + pointerOffset;
+  while (pointerAngle > 180) pointerAngle -= 360;
+  while (pointerAngle < -180) pointerAngle += 360;
+  const delta = rotation.delta + deltaOffset;
+  return {
+    delta: delta === 0 ? 0 : delta,
+    pointerAngle,
+    deltaOffset,
+    pointerOffset,
+  };
+}
+
 export function normalizedRotationPlaneBasis(plane: RotationPlaneView, invertVerticalAxis = false): RotationPlaneBasis {
   const longestAxis = Math.max(Math.hypot(plane.a, plane.b), Math.hypot(plane.c, plane.d));
   if (!Number.isFinite(longestAxis) || longestAxis < 0.000001) {

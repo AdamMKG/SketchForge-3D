@@ -167,7 +167,7 @@ The container listens on port `3000`. It also accepts connections on port `80` f
 
 ### Shared Docker Projects
 
-Docker deployments include a shared `.skf` project library. Private projects still autosave in each user's browser. The **Shared** dashboard section lists files stored in `/data/projects`, and **Export → SKF → Save to shared** writes the current project there.
+Docker deployments include a shared `.skf` project library. Private projects still autosave in each user's browser. The **Shared** dashboard section lists files stored in `/data/projects`, and **Export → SKF → Save to shared** writes the current project there. Revision-matched PNG previews are stored beside the library in `/data/projects/.thumbnails` and appear on shared project cards.
 
 Compose uses the persistent `sketchforge-shared-projects` volume by default. To use a directory on the Docker host instead, set `SKETCHFORGE_SHARED_PROJECTS_VOLUME` before starting Compose:
 

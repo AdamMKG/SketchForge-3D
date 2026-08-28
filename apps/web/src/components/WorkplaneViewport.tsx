@@ -42,16 +42,23 @@ import {
   type PlacementWorkplane,
 } from "@/lib/placementWorkplane";
 import { regularPolygonFootprintScale } from "@/lib/regularPolygonFootprint";
-import { canBeginShapeDrag, DEFAULT_SNAP_GRID, DEFAULT_WORKPLANE_WORKSPACE, normalizeSnapGrid, normalizeWorkspaceSettings, workplaneSettingsFingerprint, workspaceHydrationSyncDecision } from "@/lib/workplaneSettings";
+import { projectThumbnailDimensions } from "@/lib/projectThumbnail";
+import { canBeginShapeDrag, DEFAULT_SNAP_GRID, DEFAULT_WORKPLANE_WORKSPACE, normalizeSnapGrid, normalizeWorkspaceSettings, shapeDimensionLimit, workplaneSettingsFingerprint, workspaceHydrationSyncDecision } from "@/lib/workplaneSettings";
 import { interiorWorkplaneGridCoordinates, workplaneThemePalette, WORKPLANE_LINE_ELEVATION, WORKPLANE_MAJOR_GRID_INTERVAL } from "@/lib/workplaneGrid";
 import { cleanNearZero, cleanRotationDegrees, fallbackSolidColor, mirroredAxisCount, mirrorSign, preservesEdgeTreatmentSize, proportionalResizeScale, resizedImportedCoordinates, resizedImportedMeshPositions, resizedShapeSize, shapeDepth, shapeHasTaper, shapeOverallFootprintDimensions, shapeTaperDimensions, shapeTaperScaleAt, shapeWidth } from "@/lib/workplaneShapes";
 import { sphereTessellation } from "@/lib/sphereTessellation";
 import type { SketchForgeMcpViewFace } from "@/lib/sketchforgeMcpProtocol";
 import {
   TransformOverlay,
+  continuousSnappedWheelRotation,
   getElevationMeasureKey,
   measureKeyForHandle,
   normalizedRotationPlaneBasis,
+  rotationWheelDirectionSign,
+  ROTATION_WHEEL_SHIFT_SNAP_DEGREES,
+  ROTATION_WHEEL_SNAP_DEGREES,
+  snappedRotationDelta,
+  snappedWheelRotation,
   type DimensionMark,
   type EditingDimension,
   type EditingRotation,
@@ -182,6 +189,8 @@ type WorkplaneViewportProps = {
   initialSnap?: GridSize;
   initialWorkspace?: WorkplaneWorkspaceSettings;
   workspaceSettingsKey?: string | null;
+  showProjectNameInToolbar?: boolean;
+  onShowProjectNameInToolbarChange?: (show: boolean) => void;
   onAddShape: (shape: ShapeAsset, point?: PlacementPoint) => void;
   onAlignAnchorChange: (id: string) => void;
   onAlignPreview: (axis: AlignAxis, target: AlignTarget) => void;
@@ -439,10 +448,16 @@ type TransformDragState = {
   rotationPivot?: THREE.Vector3;
   rotationPlaneCenter?: THREE.Vector3;
   rotationPlaneView?: RotationPlaneView;
+  rotationStartPointerAngle?: number;
   rotationStartVector?: THREE.Vector3;
   rotationScreenCenter?: { x: number; y: number };
   rotationScreenSign?: number;
   rotationStartQuaternion?: THREE.Quaternion;
+  rotationWheelAppliedDelta?: number;
+  rotationWheelAppliedPointerAngle?: number;
+  rotationWheelDeltaOffset?: number;
+  rotationWheelPointerOffset?: number;
+  rotationWheelSnapDegrees?: number;
   wheelCenter?: RotationWheelView;
   hasMoved?: boolean;
 };
@@ -630,10 +645,6 @@ function rotationPatchFromQuaternion(quaternion: THREE.Quaternion): Partial<Work
   };
 }
 
-function shouldPreserveDrawingBufferForLocalAutomation() {
-  return typeof window !== "undefined";
-}
-
 function canvasPngDataUrl(canvas: HTMLCanvasElement) {
   return new Promise<string>((resolve) => {
     canvas.toBlob((blob) => {
@@ -647,6 +658,17 @@ function canvasPngDataUrl(canvas: HTMLCanvasElement) {
       reader.readAsDataURL(blob);
     }, "image/png");
   });
+}
+
+function thumbnailPngDataUrl(source: HTMLCanvasElement) {
+  const dimensions = projectThumbnailDimensions(source.width, source.height);
+  const thumbnail = document.createElement("canvas");
+  thumbnail.width = dimensions.width;
+  thumbnail.height = dimensions.height;
+  const context = thumbnail.getContext("2d", { alpha: false });
+  if (!context) return Promise.resolve("");
+  context.drawImage(source, 0, 0, dimensions.width, dimensions.height);
+  return canvasPngDataUrl(thumbnail);
 }
 
 function rotationScreenSign(axisVector: THREE.Vector3, camera: THREE.Camera) {
@@ -1978,6 +2000,7 @@ function resizeShapeFromFrameHandle(
   shiftKey: boolean,
   altKey: boolean,
   step: number,
+  maxSize: number,
 ): Partial<WorkplaneShape> {
   const shape = transform.startShape;
   const frame = transform.selectionFrame;
@@ -1986,8 +2009,6 @@ function resizeShapeFromFrameHandle(
   const localDelta = transform.scaleStartPoint ? frameLocalDelta(frame, transform.scaleStartPoint, point) : new THREE.Vector3();
 
   const signs = transform.scaleSigns ?? resizeSignsForHandle(handleKey);
-  const maxSize = 220;
-
   const axisResize = (current: number, delta: number, sign: number) => {
     if (!sign) {
       return current;
@@ -2203,6 +2224,7 @@ function resizeSelectionFromHandle(
   shiftKey: boolean,
   altKey: boolean,
   step: number,
+  maxSize: number,
 ) {
   const frame = transform.selectionFrame;
   const localDelta = transform.scaleStartPoint ? frameLocalDelta(frame, transform.scaleStartPoint, point) : new THREE.Vector3();
@@ -2213,11 +2235,11 @@ function resizeSelectionFromHandle(
     }
     const signedDelta = sign * delta;
     if (altKey) {
-      const size = snapDimension(current + signedDelta * 2, step, MIN_SHAPE_SIZE, 260);
+      const size = snapDimension(current + signedDelta * 2, step, MIN_SHAPE_SIZE, maxSize);
       return { size, scale: size / Math.max(MIN_SHAPE_SIZE, current) };
     }
     const rawSize = current + signedDelta;
-    const size = snapDimension(rawSize, step, MIN_SHAPE_SIZE, 260);
+    const size = snapDimension(rawSize, step, MIN_SHAPE_SIZE, maxSize);
     return {
       size,
       scale: size / Math.max(MIN_SHAPE_SIZE, current),
@@ -2228,9 +2250,9 @@ function resizeSelectionFromHandle(
   let nextZ = axisResize(frame.depth, localDelta.z, signs.z);
   if (shiftKey && signs.x && signs.z) {
     const scale = proportionalResizeScale(frame.width, frame.depth, nextX.size, nextZ.size);
-    const limitedScale = clamp(scale, MIN_SHAPE_SIZE / Math.max(MIN_SHAPE_SIZE, Math.min(frame.width, frame.depth)), 260 / Math.max(frame.width, frame.depth));
-    const width = snapDimension(frame.width * limitedScale, step, MIN_SHAPE_SIZE, 260);
-    const depth = snapDimension(frame.depth * limitedScale, step, MIN_SHAPE_SIZE, 260);
+    const limitedScale = clamp(scale, MIN_SHAPE_SIZE / Math.max(MIN_SHAPE_SIZE, Math.min(frame.width, frame.depth)), maxSize / Math.max(frame.width, frame.depth));
+    const width = snapDimension(frame.width * limitedScale, step, MIN_SHAPE_SIZE, maxSize);
+    const depth = snapDimension(frame.depth * limitedScale, step, MIN_SHAPE_SIZE, maxSize);
     nextX = {
       size: width,
       scale: width / Math.max(MIN_SHAPE_SIZE, frame.width),
@@ -2252,8 +2274,8 @@ function resizeSelectionFromHandle(
       .add(frame.xAxis.clone().multiplyScalar(localCenter.x * nextX.scale))
       .add(frame.yAxis.clone().multiplyScalar(localCenter.y))
       .add(frame.zAxis.clone().multiplyScalar(localCenter.z * nextZ.scale));
-    const width = snapDimension(shapeWidth(item.startShape) * nextX.scale, step, MIN_SHAPE_SIZE, 260);
-    const depth = snapDimension(shapeDepth(item.startShape) * nextZ.scale, step, MIN_SHAPE_SIZE, 260);
+    const width = snapDimension(shapeWidth(item.startShape) * nextX.scale, step, MIN_SHAPE_SIZE, maxSize);
+    const depth = snapDimension(shapeDepth(item.startShape) * nextZ.scale, step, MIN_SHAPE_SIZE, maxSize);
     const actualScaleX = width / Math.max(MIN_SHAPE_SIZE, shapeWidth(item.startShape));
     const actualScaleZ = depth / Math.max(MIN_SHAPE_SIZE, shapeDepth(item.startShape));
     const patch = {
@@ -2283,6 +2305,8 @@ export function WorkplaneViewport({
   initialSnap,
   initialWorkspace,
   workspaceSettingsKey,
+  showProjectNameInToolbar = true,
+  onShowProjectNameInToolbarChange,
   onAddShape,
   onAlignAnchorChange,
   onAlignPreview,
@@ -2835,7 +2859,7 @@ export function WorkplaneViewport({
     window.sketchforgeCaptureCanvasAsync = () => {
       state.camera.updateMatrixWorld();
       state.renderer.render(state.scene, state.camera);
-      return canvasPngDataUrl(state.renderer.domElement);
+      return thumbnailPngDataUrl(state.renderer.domElement);
     };
     window.sketchforgeCaptureView = (face = "current") => {
       if (face === "home") {
@@ -3354,6 +3378,9 @@ export function WorkplaneViewport({
       const rotationCenter = kind === "rotate" ? wheel ?? (state ? projectToScreen(pivot, state) : { x: localClientX, y: localClientY }) : undefined;
       const rotationStartPoint = kind === "rotate" && state ? rayPointOnRotationPlane(state, event.clientX, event.clientY, rotationPlaneCenter, axisVector) : null;
       const rotationStartVector = rotationStartPoint ? rotationStartPoint.sub(rotationPlaneCenter) : undefined;
+      const rotationStartPointerAngle = kind === "rotate"
+        ? rotationPlanePointerAngle(rotationPlane, localClientX, localClientY, rotationCenter ?? { x: localClientX, y: localClientY })
+        : undefined;
       const scalePlane = kind === "scale"
         ? localResizePlaneForFrame(frame, workplaneFootprintY(frame, activeWorkplane))
         : undefined;
@@ -3430,6 +3457,7 @@ export function WorkplaneViewport({
         rotationPivot: kind === "rotate" ? pivot : undefined,
         rotationPlaneCenter: kind === "rotate" ? rotationPlaneCenter : undefined,
         rotationPlaneView: kind === "rotate" ? rotationPlane : undefined,
+        rotationStartPointerAngle,
         rotationStartVector: kind === "rotate" ? rotationStartVector : undefined,
         rotationScreenCenter: rotationCenter,
         rotationScreenSign: kind === "rotate" && state ? rotationScreenSign(axisVector, state.camera) : 1,
@@ -3558,10 +3586,11 @@ export function WorkplaneViewport({
           : 0;
         const resizingFromBottom = transform.handleKey === "bottom-height";
         const rawFrameHeight = transform.selectionFrame.height + (resizingFromBottom ? -rawDelta : rawDelta);
+        const maxHeight = Math.max(...transform.items.map((item) => shapeDimensionLimit(workspaceRef.current, item.startShape.kind, 180)));
         const nextFrameHeight = clamp(
           transform.selectionFrame.height + snapValue(rawFrameHeight - transform.selectionFrame.height, step),
           MIN_SHAPE_SIZE,
-          180,
+          maxHeight,
         );
         transform.items.forEach((item) => {
           onUpdateShape(
@@ -3611,10 +3640,12 @@ export function WorkplaneViewport({
           return true;
         }
         if (transform.items.length === 1) {
-          const next = resizeShapeFromFrameHandle(transform, worldPoint, transform.handleKey, shiftKey, altKey, step);
+          const maxSize = shapeDimensionLimit(workspaceRef.current, transform.startShape.kind, 220);
+          const next = resizeShapeFromFrameHandle(transform, worldPoint, transform.handleKey, shiftKey, altKey, step, maxSize);
           onUpdateShape(transform.id, next);
         } else {
-          resizeSelectionFromHandle(transform, worldPoint, transform.handleKey, shiftKey, altKey, step).forEach(({ id, patch }) => onUpdateShape(id, patch));
+          const maxSize = Math.max(...transform.items.map((item) => shapeDimensionLimit(workspaceRef.current, item.startShape.kind, 260)));
+          resizeSelectionFromHandle(transform, worldPoint, transform.handleKey, shiftKey, altKey, step, maxSize).forEach(({ id, patch }) => onUpdateShape(id, patch));
         }
         return true;
       }
@@ -3647,14 +3678,43 @@ export function WorkplaneViewport({
           transform.wheelCenter
           && Math.hypot(localClientX - transform.wheelCenter.x, localClientY - transform.wheelCenter.y) <= transform.wheelCenter.radius
         );
-      let delta: number;
-      if (shiftKey) {
-        delta = Math.round(rawDelta / 45) * 45;
-      } else if (insideSnapWheel) {
-        delta = Math.round(rawDelta / 22.5) * 22.5;
+      const rawPointerAngle = rotationPlanePointerAngle(transform.rotationPlaneView, localClientX, localClientY, rotationCenter);
+      const wheelSnapDegrees = shiftKey ? ROTATION_WHEEL_SHIFT_SNAP_DEGREES : ROTATION_WHEEL_SNAP_DEGREES;
+      const wheelScreenSign = rotationWheelDirectionSign(transform.rotationScreenSign ?? 1);
+      const snappedWheel = insideSnapWheel
+        ? snappedWheelRotation(
+            rawPointerAngle,
+            transform.rotationStartPointerAngle
+              ?? rawPointerAngle - rawDelta * (transform.rotationScreenSign ?? 1),
+            wheelScreenSign,
+            wheelSnapDegrees,
+          )
+        : null;
+      const wheelRotation = snappedWheel
+        ? continuousSnappedWheelRotation(
+            snappedWheel,
+            wheelSnapDegrees,
+            transform.rotationWheelSnapDegrees,
+            transform.rotationWheelAppliedDelta,
+            transform.rotationWheelAppliedPointerAngle,
+            transform.rotationWheelDeltaOffset,
+            transform.rotationWheelPointerOffset,
+          )
+        : null;
+      if (wheelRotation) {
+        transform.rotationWheelSnapDegrees = wheelSnapDegrees;
+        transform.rotationWheelDeltaOffset = wheelRotation.deltaOffset;
+        transform.rotationWheelPointerOffset = wheelRotation.pointerOffset;
+        transform.rotationWheelAppliedDelta = wheelRotation.delta;
+        transform.rotationWheelAppliedPointerAngle = wheelRotation.pointerAngle;
       } else {
-        delta = Math.round(rawDelta);
+        transform.rotationWheelSnapDegrees = undefined;
+        transform.rotationWheelDeltaOffset = undefined;
+        transform.rotationWheelPointerOffset = undefined;
+        transform.rotationWheelAppliedDelta = undefined;
+        transform.rotationWheelAppliedPointerAngle = undefined;
       }
+      const delta = wheelRotation?.delta ?? snappedRotationDelta(rawDelta, false, shiftKey);
 
       const deltaQuaternion = new THREE.Quaternion().setFromAxisAngle(axisVector, THREE.MathUtils.degToRad(delta));
       const rotationDelta = deltaQuaternion.clone();
@@ -3664,7 +3724,7 @@ export function WorkplaneViewport({
           y: transform.wheelCenter ? transform.wheelCenter.y - 92 : localClientY - 18,
           text: `${Number(delta.toFixed(1))}°`,
           angle: delta,
-          pointerAngle: rotationPlanePointerAngle(transform.rotationPlaneView, localClientX, localClientY, rotationCenter),
+          pointerAngle: wheelRotation?.pointerAngle ?? rawPointerAngle,
         });
       }
       transform.items.forEach((item) => {
@@ -3798,7 +3858,8 @@ export function WorkplaneViewport({
       return;
     }
     if (Number.isFinite(value) && value > 0) {
-      const nextValue = Math.max(MIN_SHAPE_SIZE, value);
+      const customLimit = workspaceRef.current.shapeCustomizations[shape.kind]?.maxDimension;
+      const nextValue = Math.min(customLimit ?? Number.POSITIVE_INFINITY, Math.max(MIN_SHAPE_SIZE, value));
       if (edit.axis === "width") {
         const frame = selectionFrameForShapes([shape], [shape.id]);
         if (shapeHasTaper(shape) && frame) {
@@ -4183,9 +4244,12 @@ export function WorkplaneViewport({
           liftStartValue,
           rotationAxisVector: handle.kind === "rotate" ? axisVector : undefined,
           rotationPivot: handle.kind === "rotate" ? pivot : undefined,
-          rotationPlaneCenter: handle.kind === "rotate" ? rotationPlaneCenter : undefined,
-          rotationPlaneView: handle.kind === "rotate" ? rotationPlane : undefined,
-          rotationStartVector: handle.kind === "rotate" ? rotationStartVector : undefined,
+        rotationPlaneCenter: handle.kind === "rotate" ? rotationPlaneCenter : undefined,
+        rotationPlaneView: handle.kind === "rotate" ? rotationPlane : undefined,
+        rotationStartPointerAngle: handle.kind === "rotate"
+          ? rotationPlanePointerAngle(rotationPlane, localClientX, localClientY, rotationCenter ?? { x: localClientX, y: localClientY })
+          : undefined,
+        rotationStartVector: handle.kind === "rotate" ? rotationStartVector : undefined,
           rotationScreenCenter: rotationCenter,
           rotationScreenSign: handle.kind === "rotate" ? rotationScreenSign(axisVector, state.camera) : 1,
           rotationStartQuaternion: handle.kind === "rotate" ? quaternionForShape(shape) : undefined,
@@ -5070,10 +5134,12 @@ export function WorkplaneViewport({
           snap={snap}
           themePreference={themePreference}
           moveDimensionsEnabled={moveDimensionsEnabled}
+          showProjectNameInToolbar={showProjectNameInToolbar}
           onWorkspaceChange={setWorkspace}
           onSnapChange={setSnap}
           onThemePreferenceChange={onThemePreferenceChange}
           onMoveDimensionsEnabledChange={changeMoveDimensionsEnabled}
+          onShowProjectNameInToolbarChange={onShowProjectNameInToolbarChange}
           onMakeDefault={makeWorkspaceDefault}
           onClose={() => setSettingsOpen(false)}
         />
@@ -5097,7 +5163,7 @@ export function WorkplaneViewport({
 }
 
 function createThreeScene(host: HTMLDivElement): ThreeState {
-  const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance", preserveDrawingBuffer: shouldPreserveDrawingBufferForLocalAutomation() });
+  const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance", preserveDrawingBuffer: false });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setSize(host.clientWidth, host.clientHeight);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -7175,7 +7241,7 @@ function enableAcceleratedMeshPicking(mesh: THREE.Mesh, geometry: THREE.BufferGe
   mesh.raycast = acceleratedRaycast;
   const bvhGeometry = geometry as THREE.BufferGeometry & { boundsTree?: unknown };
   if ((force || triangles >= BVH_PICKING_TRIANGLE_THRESHOLD) && !bvhGeometry.boundsTree) {
-    computeBoundsTree.call(geometry, { maxLeafSize: 12 });
+    computeBoundsTree.call(geometry, { targetLeafSize: 12 });
   }
 }
 

@@ -7,9 +7,15 @@ import {
 } from "@/components/workplane/transformOverlayTypes";
 
 export {
+  continuousSnappedWheelRotation,
   getElevationMeasureKey,
   measureKeyForHandle,
   normalizedRotationPlaneBasis,
+  rotationWheelDirectionSign,
+  snappedRotationDelta,
+  snappedWheelRotation,
+  ROTATION_WHEEL_SHIFT_SNAP_DEGREES,
+  ROTATION_WHEEL_SNAP_DEGREES,
   type DimensionMark,
   type EditingDimension,
   type EditingRotation,

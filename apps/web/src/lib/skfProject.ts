@@ -872,7 +872,7 @@ function validateShapeDefinition(definition: Record<string, unknown>, label: str
   }
   if (definition.sketchRevolve !== undefined) {
     const settings = objectRecord(definition.sketchRevolve, `${label}.sketchRevolve`);
-    ["startAngle", "sweepAngle", "sides", "quality", "thickness"].forEach((field) => finiteNumber(settings[field], `${label}.sketchRevolve.${field}`));
+    ["startAngle", "sweepAngle", "sides", "quality"].forEach((field) => finiteNumber(settings[field], `${label}.sketchRevolve.${field}`));
   }
   if (kind === "gear") {
     const teeth = finiteNumber(definition.teeth, `${label}.teeth`);
