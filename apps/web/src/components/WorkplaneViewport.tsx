@@ -4553,6 +4553,8 @@ const pickPlacementSurface = useCallback((clientX: number, clientY: number, reve
       onAlignAnchorChange,
       onInteractionActiveChange,
       onModifierEdgeToggle,
+      onSeamCancel,
+      onSeamPoint,
       onSelectShape,
       onSetPlacementWorkplane,
       onWorkplaneModeChange,
@@ -5118,7 +5120,7 @@ const pickPlacementSurface = useCallback((clientX: number, clientY: number, reve
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onWorkplaneModeChange, resetView, rulerToolsOpen, setPlacementWorkplaneAtSelection, setRulerActive, setViewCubeFace, togglePlacementWorkplane, toggleProjection, zoomCamera]);
+  }, [onWorkplaneModeChange, onSeamCancel, resetView, rulerToolsOpen, setPlacementWorkplaneAtSelection, setRulerActive, setViewCubeFace, togglePlacementWorkplane, toggleProjection, zoomCamera]);
 
   return (
     <main className={`workplane-stage ${challengeTutorial ? `key-tag-tutorial-active ${challengeTutorialCollapsed ? "key-tag-tutorial-collapsed" : ""}` : ""}`}>

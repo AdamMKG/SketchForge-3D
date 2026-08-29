@@ -5849,6 +5849,10 @@ export function SketchForgeEditor({
   const edgeModifierRef = useRef<EdgeModifierSession | null>(null);
   const [textureSession, setTextureSession] = useState<TextureSession | null>(null);
   const [seamSession, setSeamSession] = useState<SeamSession | null>(null);
+  const seamSessionRef = useRef<SeamSession | null>(null);
+  useEffect(() => {
+    seamSessionRef.current = seamSession;
+  }, [seamSession]);
   const [seamOptions, setSeamOptions] = useState<SeamCutOptions>(DEFAULT_SEAM_OPTIONS);
   const [seamHover, setSeamHover] = useState<SeamPick | null>(null);
   const [seamWorldBox, setSeamWorldBox] = useState<SeamBox | null>(null);
@@ -7880,29 +7884,30 @@ const viewportShapes = useMemo(
   }, [cancelSeamCut, edgeModifier, invalidateCadModifierSession, selectedShape, selectedShapes.length, seamSession]);
 
   const handleSeamPoint = useCallback((point: { x: number; y: number; z: number }, normal: { x: number; y: number; z: number }) => {
-    if (!seamSession) {
+    const session = seamSessionRef.current;
+    if (!session) {
       return;
     }
     setSeamHover(null);
-    if (!seamSession.point1) {
-      setSeamSession({ ...seamSession, point1: { point, normal } });
+    if (!session.point1) {
+      setSeamSession({ ...session, point1: { point, normal } });
       return;
     }
-    if (seamSession.point2) {
+    if (session.point2) {
       return;
     }
     const plane = seamPlaneFromPoints(
-      [seamSession.point1.point.x, seamSession.point1.point.y, seamSession.point1.point.z],
-      [seamSession.point1.normal.x, seamSession.point1.normal.y, seamSession.point1.normal.z],
+      [session.point1.point.x, session.point1.point.y, session.point1.point.z],
+      [session.point1.normal.x, session.point1.normal.y, session.point1.normal.z],
       [point.x, point.y, point.z],
     );
     if (!plane) {
       setNotice("The two seam points are too close together — pick points further apart");
       return;
     }
-    setSeamSession({ ...seamSession, point2: { point, normal } });
+    setSeamSession({ ...session, point2: { point, normal } });
     setNotice("Seam locked — adjust the keys or apply the cut");
-  }, [seamSession]);
+  }, []);
 
   const seamTargetShape = useMemo(
     () => (seamSession ? shapes.find((entry) => entry.id === seamSession.shapeId) ?? null : null),
