@@ -199,7 +199,8 @@ export type ShapeFaceId =
   | "frontSlope"
   | "backSlope"
   | "leftSlope"
-  | "rightSlope";
+  | "rightSlope"
+  | `surface-${number}`;
 
 export type ShapeFaceTexture = {
   dataUrl: string;
@@ -295,9 +296,10 @@ export type WorkplaneShape = {
     pixelWidth: number;
     pixelHeight: number;
   };
-  // Per-face texture + bump maps for primitive shapes. Faces are identified by
-  // the declarative face spec in lib/faceTextures.ts. Cleared whenever a
-  // geometry-changing edit (dimensions, rotation, kind, tessellation) occurs.
+  // Per-face texture + bump maps. Faces are identified by the declarative face
+  // spec in lib/faceTextures.ts; imported meshes use `surface-N` ids derived
+  // from normal clustering. Cleared whenever a geometry-changing edit
+  // (dimensions, rotation, kind, tessellation) occurs.
   faceTextures?: Partial<Record<ShapeFaceId, ShapeFaceTexture>>;
   sketchProfile?: SketchProfile;
   sketchOperation?: SketchOperation;

@@ -36,6 +36,7 @@ import {
   ToolbarPasteIcon,
   ToolbarRedoIcon,
   ToolbarSnapGridIcon,
+  ToolbarSeamCutIcon,
   ToolbarSettingsIcon,
   ToolbarShapeAddIcon,
   ToolbarTrashIcon,
@@ -49,6 +50,20 @@ import { SketchWorkspace, type SketchMeasurement, type SketchPrimitive, type Ske
 import { EdgeModifierPanel } from "./workplane/EdgeModifierPanel";
 import { TexturePanel } from "./workplane/TexturePanel";
 import { DistributeModal } from "./workplane/DistributeModal";
+import { SeamCutPanel } from "./workplane/SeamCutPanel";
+import {
+  DEFAULT_SEAM_OPTIONS,
+  layoutSeamKeys,
+  seamLineInterval,
+  seamKeySpecFromOptions,
+  seamPlaneCorners,
+  seamPlaneFromPoints,
+  type SeamBox,
+  type SeamCutOptions,
+  type SeamKeyCenter,
+  type SeamPlane,
+  type SeamVec3,
+} from "@/lib/seamCut";
 import { distributionCloneShapes, distributionTileBounds, type DistributionOptions } from "@/lib/shapeDistribution";
 import {
   canonicalizeShape,
@@ -170,6 +185,29 @@ type EdgeModifierSession = {
 type TextureSession = {
   shapeId: string;
   faceId: ShapeFaceId | null;
+};
+
+type SeamPick = {
+  point: { x: number; y: number; z: number };
+  normal: { x: number; y: number; z: number };
+};
+
+type SeamSession = {
+  shapeId: string;
+  point1: SeamPick | null;
+  point2: SeamPick | null;
+};
+
+type SeamPreview = {
+  sourceId: string;
+  halves: WorkplaneShape[];
+};
+
+type SeamLayoutInfo = {
+  plane: SeamPlane;
+  box: SeamBox;
+  count: number;
+  lengthMm: number;
 };
 
 // Shape edits that regenerate geometry; per-face textures cannot survive them
@@ -2299,23 +2337,7 @@ function shapeNeedsRelief(shape: WorkplaneShape): boolean {
   return Boolean(shape.groupedShapes?.some((child) => shapeNeedsRelief(child)));
 }
 
-async function reliefMeshForShape(shape: WorkplaneShape, depthMm: number, detail: number): Promise<MeshData | null> {
-  if (shape.kind === "mesh" && shape.importedMesh) {
-    return meshForShape(shape);
-  }
-  if (shape.groupedShapes?.length) {
-    const vertices: Vec3[] = [];
-    const faces: [number, number, number][] = [];
-    for (const child of shape.groupedShapes.filter((childShape) => !childShape.hidden)) {
-      const childMesh = shapeNeedsRelief(child) ? await reliefMeshForShape(child, depthMm, detail) : meshForShape(child);
-      if (childMesh) appendMeshData(vertices, faces, childMesh);
-    }
-    return transformMesh({ name: sanitizeName(shape.name), vertices, faces }, shape);
-  }
-
-  const geometry = buildExportGeometry(shape);
-  if (!geometry) return null;
-
+async function applyReliefToTextureGeometry(shape: WorkplaneShape, geometry: THREE.BufferGeometry, depthMm: number, detail: number): Promise<MeshData | null> {
   const texturedIds = Object.entries(shape.faceTextures ?? {})
     .filter(([, texture]) => Boolean(texture?.dataUrl))
     .map(([id]) => id as ShapeFaceId);
@@ -2344,6 +2366,32 @@ async function reliefMeshForShape(shape: WorkplaneShape, depthMm: number, detail
 
   const mesh = bufferGeometryToMeshData(sanitizeName(shape.name), prepared);
   return transformMesh(mesh, shape);
+}
+
+async function reliefMeshForShape(shape: WorkplaneShape, depthMm: number, detail: number): Promise<MeshData | null> {
+  if (shape.kind === "mesh" && shape.importedMesh) {
+    const hasTextureData = Object.keys(shape.faceTextures ?? {}).some((id) => Boolean(shape.faceTextures?.[id as ShapeFaceId]?.dataUrl));
+    if (!hasTextureData) {
+      return meshForShape(shape);
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(resizedImportedMeshPositions(shape), 3));
+    geometry.computeVertexNormals();
+    return applyReliefToTextureGeometry(shape, geometry, depthMm, detail);
+  }
+  if (shape.groupedShapes?.length) {
+    const vertices: Vec3[] = [];
+    const faces: [number, number, number][] = [];
+    for (const child of shape.groupedShapes.filter((childShape) => !childShape.hidden)) {
+      const childMesh = shapeNeedsRelief(child) ? await reliefMeshForShape(child, depthMm, detail) : meshForShape(child);
+      if (childMesh) appendMeshData(vertices, faces, childMesh);
+    }
+    return transformMesh({ name: sanitizeName(shape.name), vertices, faces }, shape);
+  }
+
+  const geometry = buildExportGeometry(shape);
+  if (!geometry) return null;
+  return applyReliefToTextureGeometry(shape, geometry, depthMm, detail);
 }
 
 function meshForShape(shape: WorkplaneShape): MeshData {
@@ -4346,6 +4394,132 @@ function manifoldMeshToPositions(mesh: InstanceType<ManifoldToplevel["Mesh"]>) {
   return positions;
 }
 
+function vecDot3(a: readonly number[], b: readonly number[]) {
+  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+function seamKeyMatrix(center: SeamVec3, plane: SeamPlane) {
+  const matrix = new THREE.Matrix4().makeBasis(
+    new THREE.Vector3(plane.normal[0], plane.normal[1], plane.normal[2]),
+    new THREE.Vector3(plane.faceUp[0], plane.faceUp[1], plane.faceUp[2]),
+    new THREE.Vector3(plane.tangent[0], plane.tangent[1], plane.tangent[2]),
+  );
+  matrix.setPosition(new THREE.Vector3(center[0], center[1], center[2]));
+  return matrix;
+}
+
+function seamKeyPrism(
+  runtime: ManifoldToplevel,
+  plane: SeamPlane,
+  key: SeamKeyCenter,
+  polygon: Array<[number, number]>,
+  width: number,
+  created: ManifoldSolid[],
+) {
+  const crossSection = new runtime.CrossSection([polygon]);
+  const extruded = crossSection.extrude(width, 0, 0, [1, 1]);
+  disposeManifold(crossSection);
+  created.push(extruded);
+  return trackManifold(created, extruded.transform(manifoldTransformFromMatrix(seamKeyMatrix(key.center, plane))));
+}
+
+function manifoldPositionsToMeshData(positions: number[]): MeshData | null {
+  if (positions.length < 9) {
+    return null;
+  }
+  const vertices: Vec3[] = [];
+  const faces: [number, number, number][] = [];
+  for (let start = 0; start + 8 < positions.length; start += 9) {
+    const base = vertices.length;
+    faces.push([base, base + 1, base + 2]);
+    vertices.push(
+      [positions[start], positions[start + 1], positions[start + 2]],
+      [positions[start + 3], positions[start + 4], positions[start + 5]],
+      [positions[start + 6], positions[start + 7], positions[start + 8]],
+    );
+  }
+  return { name: "", vertices, faces };
+}
+
+function seamManifoldSideSign(runtime: ManifoldToplevel, half: ManifoldSolid, plane: SeamPlane, offset: number) {
+  const mesh = half.getMesh();
+  const positions = manifoldMeshToPositions(mesh);
+  disposeManifold(mesh);
+  let total = 0;
+  for (let i = 0; i + 2 < positions.length; i += 3) {
+    total += positions[i] * plane.normal[0] + positions[i + 1] * plane.normal[1] + positions[i + 2] * plane.normal[2];
+  }
+  const triangleCount = Math.max(1, Math.floor(positions.length / 3));
+  return total / triangleCount >= offset ? 1 : -1;
+}
+
+function seamManifoldHalfShape(runtime: ManifoldToplevel, half: ManifoldSolid, source: WorkplaneShape, partIndex: number) {
+  const mesh = half.getMesh();
+  const positions = manifoldMeshToPositions(mesh);
+  disposeManifold(mesh);
+  const data = manifoldPositionsToMeshData(positions);
+  if (!data) {
+    return null;
+  }
+  return meshComponentShape(source, data, data.faces.map((_, index) => index), partIndex, 2);
+}
+
+async function seamCutHalfShapes(
+  shape: WorkplaneShape,
+  plane: SeamPlane,
+  box: SeamBox,
+  options: SeamCutOptions,
+): Promise<{ pins: WorkplaneShape; sockets: WorkplaneShape } | null> {
+  const runtime = await getManifoldRuntime();
+  const created: ManifoldSolid[] = [];
+  const solid = shapeToManifoldSolid(runtime, shape, created);
+  if (!solid) {
+    created.forEach(disposeManifold);
+    return null;
+  }
+  try {
+    const offset = vecDot3(plane.normal, plane.point);
+    const halves = solid.splitByPlane(plane.normal, offset);
+    const [splitA, splitB] = halves;
+    created.push(splitA, splitB);
+    const aSide = seamManifoldSideSign(runtime, splitA, plane, offset);
+    const bSide = seamManifoldSideSign(runtime, splitB, plane, offset);
+    const pinSide: 1 | -1 = options.flip ? -1 : 1;
+    const pickHalf = (side: 1 | -1) => (aSide === side ? splitA : splitB);
+    const pinHalf = pickHalf(pinSide);
+    const socketHalf = pickHalf(pinSide === 1 ? -1 : 1);
+
+    const spec = seamKeySpecFromOptions(options);
+    const layout = layoutSeamKeys(plane, box, spec);
+    if (!layout || layout.keys.length === 0) {
+      return null;
+    }
+    const tenons: ManifoldSolid[] = [];
+    const mortises: ManifoldSolid[] = [];
+    layout.keys.forEach((key) => {
+      tenons.push(seamKeyPrism(runtime, plane, key, layout.tenonPolygon, spec.keyWidth, created));
+    });
+    const socketWidth = spec.keyWidth + 2 * options.clearance;
+    layout.keys.forEach((key) => {
+      mortises.push(seamKeyPrism(runtime, plane, key, layout.socketPolygon, socketWidth, created));
+    });
+
+    const pinResult = trackManifold(created, runtime.Manifold.union([pinHalf, ...tenons]));
+    const socketResult = trackManifold(created, runtime.Manifold.difference([socketHalf, ...mortises]));
+    if (!pinResult || !socketResult || pinResult.status() !== "NoError" || socketResult.status() !== "NoError") {
+      return null;
+    }
+    const pins = seamManifoldHalfShape(runtime, pinResult, shape, 0);
+    const sockets = seamManifoldHalfShape(runtime, socketResult, shape, 1);
+    if (!pins || !sockets) {
+      return null;
+    }
+    return { pins, sockets };
+  } finally {
+    created.forEach(disposeManifold);
+  }
+}
+
 function positionsInteriorTriangleCount(positions: number[], cutters: WorkplaneShape[], strictInterior = false) {
   let count = 0;
   for (let i = 0; i + 8 < positions.length; i += 9) {
@@ -5674,6 +5848,13 @@ export function SketchForgeEditor({
   const [edgeModifier, setEdgeModifier] = useState<EdgeModifierSession | null>(null);
   const edgeModifierRef = useRef<EdgeModifierSession | null>(null);
   const [textureSession, setTextureSession] = useState<TextureSession | null>(null);
+  const [seamSession, setSeamSession] = useState<SeamSession | null>(null);
+  const [seamOptions, setSeamOptions] = useState<SeamCutOptions>(DEFAULT_SEAM_OPTIONS);
+  const [seamHover, setSeamHover] = useState<SeamPick | null>(null);
+  const [seamWorldBox, setSeamWorldBox] = useState<SeamBox | null>(null);
+  const [seamPreview, setSeamPreview] = useState<SeamPreview | null>(null);
+  const seamPreviewJobRef = useRef(0);
+  const seamHoverThrottleRef = useRef(0);
   const cadModifierWorkerRef = useRef<Worker | null>(null);
   const cadModifierPendingRef = useRef(new Map<number, {
     resolve: (message: CadModifierWorkerResponse) => void;
@@ -6055,14 +6236,16 @@ const viewportShapes = useMemo(
     () =>
       edgeModifier?.preview && cadModifierBaseShapeRef.current
         ? shapes.map((shape) => shape.id === cadModifierBaseShapeRef.current?.id ? edgeModifier.preview as WorkplaneShape : shape)
-        : alignMode && alignPreview
-        ? alignedShapesForSelection(shapes, selectedIds, selectedShapes, effectiveAlignAnchorId, alignPreview.axis, alignPreview.target).nextShapes
-        : mirrorMode && mirrorPreviewAxis
-          ? mirroredShapesForSelection(shapes, selectedIds, selectedShapes, mirrorPreviewAxis).nextShapes
-          : distributeOpen && distributePreview
-            ? [...shapes, ...distributionCloneShapes(selectedShapes, distributePreview)]
-            : shapes,
-    [alignMode, alignPreview, distributeOpen, distributePreview, edgeModifier?.preview, effectiveAlignAnchorId, mirrorMode, mirrorPreviewAxis, selectedIds, selectedShapes, shapes],
+        : seamPreview
+          ? shapes.flatMap((shape) => (shape.id === seamPreview.sourceId ? seamPreview.halves : [shape]))
+          : alignMode && alignPreview
+            ? alignedShapesForSelection(shapes, selectedIds, selectedShapes, effectiveAlignAnchorId, alignPreview.axis, alignPreview.target).nextShapes
+            : mirrorMode && mirrorPreviewAxis
+              ? mirroredShapesForSelection(shapes, selectedIds, selectedShapes, mirrorPreviewAxis).nextShapes
+              : distributeOpen && distributePreview
+                ? [...shapes, ...distributionCloneShapes(selectedShapes, distributePreview)]
+                : shapes,
+    [alignMode, alignPreview, distributeOpen, distributePreview, edgeModifier?.preview, effectiveAlignAnchorId, mirrorMode, mirrorPreviewAxis, seamPreview, selectedIds, selectedShapes, shapes],
   );
   const sketchReferenceShapes = useMemo(
     () => sketchOperation === "revolve" || placementWorkplaneIsBase(activeSketchWorkplane)
@@ -7644,6 +7827,220 @@ const viewportShapes = useMemo(
     setSelectedIds([shapeId]);
     selectedIdsRef.current = [shapeId];
   }, [shapes]);
+
+  const cancelSeamCut = useCallback(() => {
+    setSeamSession(null);
+    setSeamPreview(null);
+    setSeamHover(null);
+    setSeamWorldBox(null);
+  }, []);
+
+  const handleSeamHover = useCallback((info: { point: { x: number; y: number; z: number }; normal: { x: number; y: number; z: number } } | null) => {
+    const now = performance.now();
+    if (now - seamHoverThrottleRef.current < 60) {
+      return;
+    }
+    seamHoverThrottleRef.current = now;
+    setSeamHover(info);
+  }, []);
+
+  const startSeamCut = useCallback(() => {
+    if (selectedShapes.length !== 1 || !selectedShape) {
+      setNotice("Select one object to cut a seam");
+      return;
+    }
+    if (selectedShape.locked || selectedShape.hole) {
+      setNotice("Unlock the object before cutting a seam");
+      return;
+    }
+    if (selectedShape.kind === "mesh" || selectedShape.groupedShapes?.length || selectedShape.importedMesh) {
+      setNotice("Cut seams work on parametric shapes; imported meshes and groups are not supported yet");
+      return;
+    }
+    if (seamSession) {
+      cancelSeamCut();
+      return;
+    }
+    setAlignMode(false);
+    setAlignAnchorId(null);
+    setAlignPreview(null);
+    setMirrorMode(false);
+    setMirrorPreviewAxis(null);
+    setDistributeOpen(false);
+    setDistributePreview(null);
+    setWorkplaneMode(false);
+    setTextureSession(null);
+    invalidateCadModifierSession();
+    setSeamWorldBox(null);
+    setSeamPreview(null);
+    setSeamHover(null);
+    setSeamOptions(DEFAULT_SEAM_OPTIONS);
+    setSeamSession({ shapeId: selectedShape.id, point1: null, point2: null });
+    setNotice(edgeModifier ? "Cut seam cancelled" : "Cut seam: click two points on one face of the object to draw the seam line");
+  }, [cancelSeamCut, edgeModifier, invalidateCadModifierSession, selectedShape, selectedShapes.length, seamSession]);
+
+  const handleSeamPoint = useCallback((point: { x: number; y: number; z: number }, normal: { x: number; y: number; z: number }) => {
+    if (!seamSession) {
+      return;
+    }
+    setSeamHover(null);
+    if (!seamSession.point1) {
+      setSeamSession({ ...seamSession, point1: { point, normal } });
+      return;
+    }
+    if (seamSession.point2) {
+      return;
+    }
+    const plane = seamPlaneFromPoints(
+      [seamSession.point1.point.x, seamSession.point1.point.y, seamSession.point1.point.z],
+      [seamSession.point1.normal.x, seamSession.point1.normal.y, seamSession.point1.normal.z],
+      [point.x, point.y, point.z],
+    );
+    if (!plane) {
+      setNotice("The two seam points are too close together — pick points further apart");
+      return;
+    }
+    setSeamSession({ ...seamSession, point2: { point, normal } });
+    setNotice("Seam locked — adjust the keys or apply the cut");
+  }, [seamSession]);
+
+  const seamTargetShape = useMemo(
+    () => (seamSession ? shapes.find((entry) => entry.id === seamSession.shapeId) ?? null : null),
+    [seamSession, shapes],
+  );
+
+  const seamPlaneForDisplay = useMemo(() => {
+    if (!seamSession?.point1) {
+      return null;
+    }
+    const anchor = seamSession.point1;
+    const other = seamSession.point2 ?? seamHover;
+    if (!other) {
+      return null;
+    }
+    return seamPlaneFromPoints(
+      [anchor.point.x, anchor.point.y, anchor.point.z],
+      [anchor.normal.x, anchor.normal.y, anchor.normal.z],
+      [other.point.x, other.point.y, other.point.z],
+    );
+  }, [seamHover, seamSession]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!seamTargetShape) {
+      setSeamWorldBox(null);
+      return;
+    }
+    getManifoldRuntime()
+      .then((runtime) => {
+        if (cancelled) {
+          return;
+        }
+        const created: ManifoldSolid[] = [];
+        const solid = shapeToManifoldSolid(runtime, seamTargetShape, created);
+        if (!solid) {
+          created.forEach(disposeManifold);
+          setSeamWorldBox(null);
+          return;
+        }
+        const mesh = solid.getMesh();
+        const positions = manifoldMeshToPositions(mesh);
+        disposeManifold(mesh);
+        created.forEach(disposeManifold);
+        const bounds = boundsForPositions(positions);
+        setSeamWorldBox(bounds
+          ? { minX: bounds.minX, minY: bounds.minY, minZ: bounds.minZ, maxX: bounds.maxX, maxY: bounds.maxY, maxZ: bounds.maxZ }
+          : null);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setSeamWorldBox(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [seamTargetShape]);
+
+  const seamBladeCorners = useMemo(() => {
+    if (!seamWorldBox || !seamPlaneForDisplay) {
+      return null;
+    }
+    return seamPlaneCorners(seamWorldBox, seamPlaneForDisplay);
+  }, [seamPlaneForDisplay, seamWorldBox]);
+
+  const seamLayoutInfo = useMemo<SeamLayoutInfo | null>(() => {
+    if (!seamPlaneForDisplay || !seamWorldBox) {
+      return null;
+    }
+    const layout = layoutSeamKeys(seamPlaneForDisplay, seamWorldBox, seamKeySpecFromOptions(seamOptions));
+    if (!layout) {
+      return null;
+    }
+    const interval = seamLineInterval(seamWorldBox, seamPlaneForDisplay);
+    return {
+      plane: seamPlaneForDisplay,
+      box: seamWorldBox,
+      count: layout.count,
+      lengthMm: interval ? interval[1] - interval[0] : 0,
+    };
+  }, [seamOptions, seamPlaneForDisplay, seamWorldBox]);
+
+  useEffect(() => {
+    if (!seamSession?.point2 || !seamTargetShape || !seamPlaneForDisplay || !seamWorldBox) {
+      setSeamPreview(null);
+      return;
+    }
+    const timeout = window.setTimeout(() => {
+      const job = seamPreviewJobRef.current + 1;
+      seamPreviewJobRef.current = job;
+      seamCutHalfShapes(seamTargetShape, seamPlaneForDisplay, seamWorldBox, seamOptions)
+        .then((halves) => {
+          if (job !== seamPreviewJobRef.current) {
+            return;
+          }
+          setSeamPreview(halves ? { sourceId: seamTargetShape.id, halves: [halves.pins, halves.sockets] } : null);
+        })
+        .catch(() => {
+          if (job === seamPreviewJobRef.current) {
+            setSeamPreview(null);
+          }
+        });
+    }, 120);
+    return () => window.clearTimeout(timeout);
+  }, [seamOptions, seamPlaneForDisplay, seamSession, seamTargetShape, seamWorldBox]);
+
+  useEffect(() => {
+    if (!seamSession) {
+      return;
+    }
+    if (alignMode || mirrorMode || distributeOpen || workplaneMode || Boolean(edgeModifier) || Boolean(textureSession) || sketchActive) {
+      cancelSeamCut();
+    }
+  }, [alignMode, cancelSeamCut, distributeOpen, edgeModifier, mirrorMode, seamSession, sketchActive, textureSession, workplaneMode]);
+
+  const applySeamCut = useCallback(async () => {
+    if (!seamSession?.point2) {
+      setNotice("Finish drawing the seam line first");
+      return;
+    }
+    if (!seamTargetShape || !seamPlaneForDisplay || !seamWorldBox) {
+      setNotice("The seam preview is still loading");
+      return;
+    }
+    const halves = await seamCutHalfShapes(seamTargetShape, seamPlaneForDisplay, seamWorldBox, seamOptions);
+    if (!halves) {
+      setNotice("This object is too small for the seam keys — try fewer or smaller keys");
+      return;
+    }
+    const shape = seamTargetShape;
+    commitShapes(
+      [...shapes.filter((entry) => entry.id !== shape.id), halves.pins, halves.sockets],
+      [halves.pins.id, halves.sockets.id],
+      `Cut ${shape.name} into two parts`,
+    );
+    cancelSeamCut();
+  }, [cancelSeamCut, commitShapes, seamOptions, seamPlaneForDisplay, seamSession, seamTargetShape, seamWorldBox, shapes]);
 
   const clearFaceTexture = useCallback(
     (shapeId: string, faceId: ShapeFaceId) => {
@@ -9526,6 +9923,8 @@ const viewportShapes = useMemo(
         edgeModifierKind={edgeModifier?.kind ?? null}
         canPaint={selectedShapes.length === 1 && Boolean(selectedShape && !selectedShape.locked && !selectedShape.hole && isFaceTextureSupportedKind(selectedShape.kind))}
         paintActive={Boolean(textureSession)}
+        canSeamCut={selectedShapes.length === 1 && Boolean(selectedShape && !selectedShape.locked && !selectedShape.hole && selectedShape.kind !== "mesh" && !selectedShape.importedMesh && !selectedShape.groupedShapes?.length)}
+        seamActive={Boolean(seamSession)}
         mirrorMode={mirrorMode}
         sketchActive={sketchActive}
         sketchOperation={sketchOperation}
@@ -9561,6 +9960,7 @@ const viewportShapes = useMemo(
         onFillet={() => edgeModifier?.kind === "fillet" ? cancelEdgeModifier() : startEdgeModifier("fillet")}
         onMirror={toggleMirrorMode}
         onPaint={startTextureMode}
+        onSeamCut={startSeamCut}
         onPaste={pasteShape}
         onRedo={redo}
         onSnap={snapSelected}
@@ -9670,6 +10070,12 @@ challengeTutorial={challengeTutorial}
           onChallengeTutorialFinish={onChallengeTutorialFinish}
           textureMode={Boolean(textureSession)}
           onFacePicked={handleFacePicked}
+          seamMode={Boolean(seamSession)}
+          seamTargetId={seamSession?.shapeId ?? undefined}
+          seamCutPreview={seamBladeCorners ? { corners: seamBladeCorners } : null}
+          onSeamPoint={handleSeamPoint}
+          onSeamHover={handleSeamHover}
+          onSeamCancel={cancelSeamCut}
           themePreference={themePreference}
           resolvedTheme={resolvedTheme}
           onThemePreferenceChange={onThemePreferenceChange}
@@ -9736,6 +10142,22 @@ challengeTutorial={challengeTutorial}
           onBumpScaleChange={(bumpScale) => updateFaceTexture({ bumpScale })}
           onClear={() => textureSession.faceId ? clearFaceTexture(textureSession.shapeId, textureSession.faceId) : setNotice("Click a face on the object first")}
           onCancel={cancelTextureSession}
+        />
+      ) : null}
+      {seamSession && seamTargetShape ? (
+        <SeamCutPanel
+          targetName={seamTargetShape.name}
+          pointCount={(seamSession.point2 ? 2 : seamSession.point1 ? 1 : 0) as 0 | 1 | 2}
+          options={seamOptions}
+          actualKeyCount={seamLayoutInfo?.count ?? null}
+          seamLength={seamLayoutInfo?.lengthMm ?? null}
+          workspace={workspaceSettings}
+          canApply={Boolean(seamSession.point2 && seamWorldBox && seamPlaneForDisplay)}
+          conflictingNotice={edgeModifier ? "Active edge tool is not compatible" : null}
+          onOptionsChange={setSeamOptions}
+          onCountChange={(count) => setSeamOptions((current) => ({ ...current, keyCount: count }))}
+          onApply={applySeamCut}
+          onCancel={cancelSeamCut}
         />
       ) : null}
       {distributeOpen ? (
@@ -9887,6 +10309,8 @@ function SecondaryToolbar({
   edgeModifierKind,
   canPaint,
   paintActive,
+  canSeamCut,
+  seamActive,
   canGroup,
   canIntersect,
   canRedo,
@@ -9925,6 +10349,7 @@ function SecondaryToolbar({
   onFillet,
   onMirror,
   onPaint,
+  onSeamCut,
   onPaste,
   onRedo,
   onSnap,
@@ -9949,6 +10374,8 @@ function SecondaryToolbar({
   edgeModifierKind: CadModifierKind | null;
   canPaint: boolean;
   paintActive: boolean;
+  canSeamCut: boolean;
+  seamActive: boolean;
   canGroup: boolean;
   canIntersect: boolean;
   canRedo: boolean;
@@ -9989,6 +10416,7 @@ function SecondaryToolbar({
   onFillet: () => void;
   onMirror: () => void;
   onPaint: () => void;
+  onSeamCut: () => void;
   onPaste: () => void;
   onRedo: () => void;
   onSnap: () => void;
@@ -10164,6 +10592,7 @@ function SecondaryToolbar({
     { label: "Chamfer", icon: ToolbarChamferIcon, action: onChamfer, enabled: canEdgeModify, active: edgeModifierKind === "chamfer" },
     { label: "Fillet", icon: ToolbarFilletIcon, action: onFillet, enabled: canEdgeModify, active: edgeModifierKind === "fillet" },
     { label: "Paint", icon: ToolbarPaintIcon, action: onPaint, enabled: canPaint, active: paintActive },
+    { label: "Cut seam", icon: ToolbarSeamCutIcon, action: onSeamCut, enabled: canSeamCut, active: seamActive },
   ];
   const arrangeTools = [
 { label: "Distribute copies", icon: ToolbarDistributeIcon, action: onDistribute, enabled: hasSelection, active: distributeOpen },

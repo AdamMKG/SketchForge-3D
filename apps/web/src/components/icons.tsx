@@ -180,6 +180,16 @@ export function ToolbarPaintIcon() {
   );
 }
 
+export function ToolbarSeamCutIcon() {
+  return (
+    <svg viewBox="0 0 48 48" aria-hidden="true">
+      <rect x="6" y="12" width="36" height="24" rx="3" fill="none" stroke="currentColor" strokeWidth="2.6" />
+      <path d="M16 16l4 8-4 8M32 16l-4 8 4 8" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M24 12v24" fill="none" stroke="currentColor" strokeWidth="2" strokeDasharray="2.5 3" />
+    </svg>
+  );
+}
+
 export function ToolbarPreserveEdgeIcon(props: IconProps) {
   return (
     <svg viewBox="0 0 48 48" aria-hidden="true" {...props}>

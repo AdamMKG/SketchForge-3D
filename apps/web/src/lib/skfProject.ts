@@ -450,6 +450,7 @@ async function serializeShapeNode(
   if (faceTextures && Object.keys(faceTextures).length) {
     const serialized: Record<string, unknown> = {};
     for (const [faceId, texture] of Object.entries(faceTextures)) {
+      if (!texture) continue;
       const { dataUrl, ...textureDefinition } = texture;
       const decoded = decodeDataUrl(dataUrl);
       const asset = await builder.addAsset("image", decoded.bytes, decoded.mediaType, { fileName: `${shape.name}-${faceId}-texture` });

@@ -216,6 +216,17 @@ challengeTutorial?: ChallengeTutorialId | null;
   onChallengeTutorialFinish?: () => void;
   textureMode?: boolean;
   onFacePicked?: (shapeId: string, faceId: string) => void;
+  seamMode?: boolean;
+  seamTargetId?: string;
+  seamCutPreview?: { corners: number[][] } | null;
+  onSeamPoint?: (
+    point: { x: number; y: number; z: number },
+    normal: { x: number; y: number; z: number },
+  ) => void;
+  onSeamHover?: (
+    info: { point: { x: number; y: number; z: number }; normal: { x: number; y: number; z: number } } | null,
+  ) => void;
+  onSeamCancel?: () => void;
   themePreference?: AppThemePreference;
   resolvedTheme?: ResolvedAppTheme;
   onThemePreferenceChange?: (preference: AppThemePreference) => void;
@@ -2347,6 +2358,12 @@ challengeTutorial = null,
   onChallengeTutorialFinish,
   textureMode = false,
   onFacePicked,
+  seamMode = false,
+  seamTargetId,
+  seamCutPreview = null,
+  onSeamPoint,
+  onSeamHover,
+  onSeamCancel,
   themePreference = "system",
   resolvedTheme = "light",
   onThemePreferenceChange,
@@ -2422,6 +2439,8 @@ challengeTutorial = null,
   const modifierPreviewActiveRef = useRef(modifierPreviewActive);
   const modifierEdgesRef = useRef(modifierEdges);
   const textureModeRef = useRef(textureMode);
+  const seamModeRef = useRef(Boolean(seamMode));
+  const seamTargetIdRef = useRef(seamTargetId);
   const [hoverModifierEdgeId, setHoverModifierEdgeId] = useState<number | null>(null);
   const selectedIdsKeyRef = useRef(selectedIds.join("|"));
   const placementWorkplaneRef = useRef(placementWorkplane);
@@ -2728,6 +2747,18 @@ challengeTutorial = null,
   useEffect(() => {
     textureModeRef.current = textureMode;
   }, [textureMode]);
+
+  useEffect(() => {
+    seamModeRef.current = Boolean(seamMode);
+  }, [seamMode]);
+
+  useEffect(() => {
+    seamTargetIdRef.current = seamTargetId;
+  }, [seamTargetId]);
+
+  useEffect(() => {
+    refreshSeamCutPreview(threeRef.current, seamCutPreview, resolvedTheme);
+  }, [seamCutPreview, resolvedTheme]);
 
   useEffect(() => {
     modifierPreviewActiveRef.current = modifierPreviewActive;
@@ -4124,6 +4155,37 @@ const pickPlacementSurface = useCallback((clientX: number, clientY: number, reve
     return null;
   }, []);
 
+  const pickSurfacePoint = useCallback((clientX: number, clientY: number) => {
+    const state = threeRef.current;
+    if (!state) {
+      return null;
+    }
+    const rect = state.renderer.domElement.getBoundingClientRect();
+    state.pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    state.pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+    state.raycaster.setFromCamera(state.pointer, state.camera);
+    state.raycaster.layers.set(RENDER_LAYER_SHAPES);
+    const targetId = seamTargetIdRef.current;
+    const intersections = state.raycaster.intersectObjects(state.shapeLayer.children, true);
+    const hit = intersections.find((entry) => {
+      const shapeId = entry.object.userData.shapeId;
+      return typeof shapeId === "string" && (!targetId || shapeId === targetId);
+    });
+    if (!hit || !hit.face) {
+      return null;
+    }
+    const normal = hit.face.normal.clone();
+    if (normal.lengthSq() < 1e-12) {
+      return null;
+    }
+    const object = hit.object as THREE.Object3D;
+    if (object.matrixWorld) {
+      normal.applyMatrix3(new THREE.Matrix3().getNormalMatrix(object.matrixWorld));
+    }
+    normal.normalize();
+    return { point: hit.point, normal };
+  }, []);
+
   const pickModifierEdge = useCallback((clientX: number, clientY: number) => {
     const state = threeRef.current;
     if (!state) return null;
@@ -4181,6 +4243,18 @@ const pickPlacementSurface = useCallback((clientX: number, clientY: number, reve
         event.preventDefault();
         const edgeId = pickModifierEdge(event.clientX, event.clientY);
         if (edgeId !== null) onModifierEdgeToggle?.(edgeId, event.shiftKey);
+        return;
+      }
+
+      if (seamModeRef.current) {
+        event.preventDefault();
+        const picked = pickSurfacePoint(event.clientX, event.clientY);
+        if (picked) {
+          onSeamPoint?.(
+            { x: picked.point.x, y: picked.point.y, z: picked.point.z },
+            { x: picked.normal.x, y: picked.normal.y, z: picked.normal.z },
+          );
+        }
         return;
       }
 
@@ -4498,6 +4572,12 @@ const pickPlacementSurface = useCallback((clientX: number, clientY: number, reve
 
   const handlePointerMove = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
+      if (seamModeRef.current) {
+        const picked = pickSurfacePoint(event.clientX, event.clientY);
+        onSeamHover?.(picked
+          ? { point: { x: picked.point.x, y: picked.point.y, z: picked.point.z }, normal: { x: picked.normal.x, y: picked.normal.y, z: picked.normal.z } }
+          : null);
+      }
       if (workplaneModeRef.current) {
         const surface = pickPlacementSurface(event.clientX, event.clientY, event.shiftKey);
         let preview = surface?.workplane ?? null;
@@ -4612,7 +4692,7 @@ const pickPlacementSurface = useCallback((clientX: number, clientY: number, reve
         threeRef.current.needsRender = true;
       }
     },
-    [pickPlacementSurface, setMarqueeFromState, toPlacementWorkplanePoint, toRawPlanePoint, updateModifierEdgeHover, updateRulerHover, updateTransform],
+    [pickPlacementSurface, pickSurfacePoint, onSeamHover, setMarqueeFromState, toPlacementWorkplanePoint, toRawPlanePoint, updateModifierEdgeHover, updateRulerHover, updateTransform],
   );
 
   const handlePointerLeave = useCallback(() => {
@@ -5001,6 +5081,9 @@ const pickPlacementSurface = useCallback((clientX: number, clientY: number, reve
       if (event.key === "Escape" && workplaneModeRef.current) {
         event.preventDefault();
         onWorkplaneModeChange(false);
+      } else if (event.key === "Escape" && seamModeRef.current) {
+        event.preventDefault();
+        onSeamCancel?.();
       } else if (event.key === "Escape" && (rulerToolsOpen || rulerModeRef.current || rulerDeleteModeRef.current || rulerMoveModeRef.current)) {
         event.preventDefault();
         setRulerActive(false);
@@ -5109,7 +5192,7 @@ const pickPlacementSurface = useCallback((clientX: number, clientY: number, reve
         )}
       </div>
 
-      <section className={`workplane-wrap ${workplaneMode ? "placing-workplane" : ""} ${rulerMode ? "ruler-mode" : ""} ${rulerDeleteMode ? "ruler-delete-mode" : ""} ${rulerMoveMode ? "ruler-move-mode" : ""} ${modifierActive ? "modifier-edge-pick" : ""}`} aria-label="Workplane">
+      <section className={`workplane-wrap ${workplaneMode ? "placing-workplane" : ""} ${rulerMode ? "ruler-mode" : ""} ${rulerDeleteMode ? "ruler-delete-mode" : ""} ${rulerMoveMode ? "ruler-move-mode" : ""} ${modifierActive ? "modifier-edge-pick" : ""} ${seamMode ? "seam-mode" : ""}`} aria-label="Workplane">
         <div className="workplane-plane">
           <div
             className="three-workplane-host"
@@ -5125,7 +5208,7 @@ const pickPlacementSurface = useCallback((clientX: number, clientY: number, reve
             onPointerCancel={finishDrag}
             onPointerLeave={handlePointerLeave}
           />
-{!workplaneMode && !textureMode && marqueeRect ? <div className="selection-marquee" style={marqueeRect} /> : null}
+{!workplaneMode && !textureMode && !seamMode && marqueeRect ? <div className="selection-marquee" style={marqueeRect} /> : null}
           {!workplaneMode && moveDimensionsEnabled && moveDimensionOverlay ? (
             <MoveDimensionOverlay
               overlay={moveDimensionOverlay}
@@ -5133,7 +5216,7 @@ const pickPlacementSurface = useCallback((clientX: number, clientY: number, reve
               onCommit={commitMoveDimension}
             />
           ) : null}
-          {!workplaneMode && transformOverlay && !alignMode && !mirrorMode && !rulerMode && !rulerDeleteMode && !rulerMoveMode && !modifierActive && !textureMode ? (
+          {!workplaneMode && transformOverlay && !alignMode && !mirrorMode && !rulerMode && !rulerDeleteMode && !rulerMoveMode && !modifierActive && !textureMode && !seamMode ? (
             <TransformOverlay
               box={transformOverlay}
               measureKey={pinnedMeasureKey ?? hoverMeasureKey}
@@ -5181,7 +5264,7 @@ const pickPlacementSurface = useCallback((clientX: number, clientY: number, reve
         </div>
       </section>
 
-      {selectedShape && !modifierActive && !textureMode && !rulerMode && !rulerDeleteMode && !rulerMoveMode ? (
+      {selectedShape && !modifierActive && !textureMode && !seamMode && !rulerMode && !rulerDeleteMode && !rulerMoveMode ? (
         <ShapeInspector
           shape={selectedShape}
           snap={snap}
@@ -5635,6 +5718,87 @@ function rebuildWorkplane(
   state.workplaneLayer.quaternion.identity();
   setObjectRenderLayer(state.workplaneLayer, RENDER_LAYER_WORKPLANE);
   freezeStaticObjectMatrices(state.workplaneLayer);
+}
+
+function refreshSeamCutPreview(state: ThreeState | null, preview: { corners: number[][] } | null, theme: ResolvedAppTheme) {
+  if (!state) {
+    return;
+  }
+  const existing = state.helperLayer.getObjectByName("SeamCutPreview");
+  if (!preview || preview.corners.length < 4) {
+    if (existing) {
+      state.helperLayer.remove(existing);
+      disposeChildren(existing as THREE.Group);
+      state.needsRender = true;
+    }
+    return;
+  }
+  let group = existing as THREE.Group | null;
+  if (!group) {
+    group = new THREE.Group();
+    group.name = "SeamCutPreview";
+    group.layers.set(RENDER_LAYER_HELPERS);
+    state.helperLayer.add(group);
+  }
+  disposeChildren(group);
+  const corners = (preview.corners as number[][])
+    .slice(0, 4)
+    .map(([x, y, z]) => new THREE.Vector3(x, y, z));
+  const edgeA = new THREE.Vector3().subVectors(corners[1], corners[0]);
+  const edgeB = new THREE.Vector3().subVectors(corners[2], corners[1]);
+  const width = edgeA.length();
+  const height = edgeB.length();
+  if (width < 1e-6 || height < 1e-6) {
+    return;
+  }
+  const xAxis = edgeA.clone().normalize();
+  const yAxis = edgeB.clone().normalize();
+  const normal = new THREE.Vector3().crossVectors(xAxis, yAxis).normalize();
+  const center = new THREE.Vector3().addVectors(corners[0], corners[2]).multiplyScalar(0.5);
+  const basis = new THREE.Matrix4().makeBasis(xAxis, yAxis, normal);
+  const quaternion = new THREE.Quaternion().setFromRotationMatrix(basis);
+
+  const color = theme === "dark" ? "#ffb35c" : "#cf6a1f";
+  const patch = new THREE.Mesh(
+    new THREE.PlaneGeometry(width, height),
+    new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0.18,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
+    }),
+  );
+  patch.quaternion.copy(quaternion);
+  patch.position.copy(center);
+  patch.renderOrder = 940;
+  group.add(patch);
+
+  const outlineMaterial = new THREE.LineBasicMaterial({
+    color: theme === "dark" ? "#ffc98a" : "#b65b14",
+    transparent: true,
+    opacity: 0.95,
+    depthWrite: false,
+  });
+  const outlinePoints = [
+    corners[0].x, corners[0].y, corners[0].z,
+    corners[1].x, corners[1].y, corners[1].z,
+    corners[1].x, corners[1].y, corners[1].z,
+    corners[2].x, corners[2].y, corners[2].z,
+    corners[2].x, corners[2].y, corners[2].z,
+    corners[3].x, corners[3].y, corners[3].z,
+    corners[3].x, corners[3].y, corners[3].z,
+    corners[0].x, corners[0].y, corners[0].z,
+  ];
+  const outlineGeometry = new THREE.BufferGeometry();
+  outlineGeometry.setAttribute("position", new THREE.Float32BufferAttribute(outlinePoints, 3));
+  const outline = new THREE.LineSegments(outlineGeometry, outlineMaterial);
+  outline.renderOrder = 941;
+  group.add(outline);
+  state.needsRender = true;
 }
 
 function syncWorkplaneHoverPreview(
@@ -7475,27 +7639,56 @@ function createShapeObject(
     case "text":
       addTextShape(group, material, shape, geometryCacheKey, onTextureReady);
       break;
-    case "mesh":
+    case "mesh": {
       if (shape.importedMesh) {
         const preserveEdgeSize = preservesEdgeTreatmentSize(shape);
-        addMesh(
-          group,
-          preserveEdgeSize ? getPreservedImportedMeshGeometry(shape) : getImportedMeshGeometry(shape.importedMesh),
-          material,
-          shape,
-          undefined,
-          undefined,
-          preserveEdgeSize ? undefined : new THREE.Vector3(
-            width / Math.max(0.001, shape.importedMesh.baseWidth),
-            height / Math.max(0.001, shape.importedMesh.baseHeight),
-            depth / Math.max(0.001, shape.importedMesh.baseDepth),
-          ),
-          onTextureReady,
-        );
+        const importedMesh = shape.importedMesh;
+        if (hasFaceTextures(shape)) {
+          // Faces are baked into the geometry (reordered + UVs + material
+          // groups), so the textured variant is sized via positions instead of
+          // a non-uniform mesh scale and cached via sharedShapeGeometry with
+          // the face-texture token in its key.
+          addMesh(
+            group,
+            sharedShapeGeometry(shape, geometryCacheKey, () => {
+              const resized = resizedImportedCoordinates(shape, importedMesh.positions);
+              const next = new THREE.BufferGeometry();
+              next.setAttribute("position", new THREE.Float32BufferAttribute(resized, 3));
+              next.computeVertexNormals();
+              return next;
+            }),
+            material,
+            shape,
+            undefined,
+            undefined,
+            undefined,
+            onTextureReady,
+          );
+        } else {
+          const importedGeometry = preserveEdgeSize ? getPreservedImportedMeshGeometry(shape) : getImportedMeshGeometry(importedMesh);
+          if (!importedGeometry.userData.shapeFaces?.length) {
+            importedGeometry.userData.shapeFaces = computeShapeFaces(shape, importedGeometry);
+          }
+          addMesh(
+            group,
+            importedGeometry,
+            material,
+            shape,
+            undefined,
+            undefined,
+            preserveEdgeSize ? undefined : new THREE.Vector3(
+              width / Math.max(0.001, importedMesh.baseWidth),
+              height / Math.max(0.001, importedMesh.baseHeight),
+              depth / Math.max(0.001, importedMesh.baseDepth),
+            ),
+            onTextureReady,
+          );
+        }
       } else {
         addMesh(group, sharedShapeGeometry(shape, geometryCacheKey, () => new THREE.BoxGeometry(size, Math.max(3, height * 0.35), size * 0.72)), material, shape, undefined, undefined, undefined, onTextureReady);
       }
       break;
+    }
     case "scribble":
       addMesh(group, sharedShapeGeometry(shape, geometryCacheKey, () => new THREE.TorusKnotGeometry(size * 0.22, size * 0.055, 120, 12)), material, shape, undefined, undefined, undefined, onTextureReady);
       break;

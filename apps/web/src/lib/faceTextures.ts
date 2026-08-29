@@ -2,7 +2,7 @@ import * as THREE from "three";
 import type { ShapeFaceId, ShapeKind, WorkplaneShape } from "@/types/sketchforge";
 import { shapeDepth, shapeWidth } from "@/lib/workplaneShapes";
 
-// Declarative per-face texturing for primitive shapes.
+// Declarative per-face texturing for primitive and imported-mesh shapes.
 //
 // A "face" is a set of triangles that a user can pick in the 3D viewport and
 // paint a texture onto. Faces are derived from the built geometry rather than
@@ -12,7 +12,10 @@ import { shapeDepth, shapeWidth } from "@/lib/workplaneShapes";
 //   - smooth bodies (sphere, icosahedron, torus, text, scribble, tube, ring,
 //     gear, rounded box) are a single "surface" face;
 //   - flat custom builders (4-sided pyramid, wedge, roof, round roof, half
-//     sphere) are clustered by geometric normal.
+//     sphere) are clustered by geometric normal;
+//   - imported meshes are clustered by normal into a bounded set of "surface-N"
+//     faces so any mesh is paintable (machined parts split cleanly, organic
+//     meshes degrade to a whole-object group).
 //
 // UVs come from the built-in attribute where present, otherwise they are
 // generated per face (planar projection onto the face plane, or a cylindrical
@@ -77,12 +80,19 @@ const SURFACE_KINDS: Partial<Record<ShapeKind, { id: string; label: string; uv: 
 
 // Flat custom builders whose triangles are interleaved across faces and so must
 // be reordered before material groups can be applied.
-const REORDER_KINDS = new Set<ShapeKind>(["pyramid", "wedge", "roof", "roundRoof"]);
+const REORDER_KINDS = new Set<ShapeKind>(["pyramid", "wedge", "roof", "roundRoof", "mesh"]);
 
 const CLUSTER_TOLERANCE_RAD = 0.05;
 
+// Imported meshes have no material groups to lean on. Triangles are bucketed
+// by their quantized normal direction (coarse ~7-9 degree cells), then merged
+// down to at most MAX_MESH_FACES clusters so the per-face material list stays
+// within WebGL's multi-material budget.
+const MESH_NORMAL_QUANTIZE = 8;
+const MAX_MESH_FACES = 16;
+
 export function isFaceTextureSupportedKind(kind: ShapeKind) {
-  return kind !== "mesh" && kind !== "sketch";
+  return kind !== "sketch";
 }
 
 export function hasFaceTextures(shape: WorkplaneShape) {
@@ -125,6 +135,8 @@ export function faceIdForNormal(normal: THREE.Vector3): string {
 }
 
 export function faceLabelForId(id: string) {
+  const surfaceMatch = /^surface-(\d+)$/.exec(id);
+  if (surfaceMatch) return `Surface ${surfaceMatch[1]}`;
   const first = id.charAt(0).toUpperCase();
   return `${first}${id.slice(1)}`;
 }
@@ -195,6 +207,63 @@ function clusterFaces(geometry: THREE.BufferGeometry) {
   });
 }
 
+// Clusters an imported mesh's triangles into a bounded, deterministic set of
+// "surface-N" faces. Face ids are stable for a given tessellation so textures
+// survive picks, rebuilds, and project round-trips.
+function meshShapeFaces(geometry: THREE.BufferGeometry): ShapeFace[] {
+  const triangleCount = triangleCountOf(geometry);
+
+  const buckets = new Map<string, { normal: THREE.Vector3; triangles: number[]; firstTriangle: number }>();
+  const tmp = new THREE.Vector3();
+  for (let triangle = 0; triangle < triangleCount; triangle += 1) {
+    triangleNormal(geometry, triangle, tmp);
+    const key = `${Math.round(tmp.x * MESH_NORMAL_QUANTIZE)},${Math.round(tmp.y * MESH_NORMAL_QUANTIZE)},${Math.round(tmp.z * MESH_NORMAL_QUANTIZE)}`;
+    let bucket = buckets.get(key);
+    if (!bucket) {
+      bucket = { normal: tmp.clone(), triangles: [], firstTriangle: triangle };
+      buckets.set(key, bucket);
+    }
+    bucket.triangles.push(triangle);
+  }
+
+  const clusters = [...buckets.values()];
+  while (clusters.length > MAX_MESH_FACES) {
+    let smallest = 0;
+    for (let index = 1; index < clusters.length; index += 1) {
+      if (clusters[index].triangles.length < clusters[smallest].triangles.length) {
+        smallest = index;
+      }
+    }
+    const removed = clusters[smallest];
+    let nearest = -1;
+    let bestDot = Number.NEGATIVE_INFINITY;
+    for (let index = 0; index < clusters.length; index += 1) {
+      if (index === smallest) continue;
+      const dot = clusters[index].normal.dot(removed.normal);
+      if (dot > bestDot) {
+        bestDot = dot;
+        nearest = index;
+      }
+    }
+    const target = clusters[nearest];
+    target.triangles.push(...removed.triangles);
+    target.firstTriangle = Math.min(target.firstTriangle, removed.firstTriangle);
+    target.normal.add(removed.normal).normalize();
+    clusters.splice(smallest, 1);
+  }
+
+  clusters.sort((a, b) => {
+    const countDiff = b.triangles.length - a.triangles.length;
+    if (countDiff !== 0) return countDiff;
+    return a.firstTriangle - b.firstTriangle;
+  });
+
+  return clusters.map((cluster, index) => {
+    const triangles = [...cluster.triangles].sort((a, b) => a - b);
+    return faceFromTriangles(`surface-${index}`, `Surface ${index}`, "planar", cluster.normal.clone(), triangles);
+  });
+}
+
 function classifyRoundRoof(geometry: THREE.BufferGeometry) {
   const triangleCount = triangleCountOf(geometry);
   const dome: number[] = [];
@@ -237,6 +306,8 @@ function classifyHalfSphere(geometry: THREE.BufferGeometry) {
 // that cannot be face-textured (imported meshes, sketch bodies).
 export function computeShapeFaces(shape: WorkplaneShape, geometry: THREE.BufferGeometry): ShapeFace[] {
   if (!isFaceTextureSupportedKind(shape.kind)) return [];
+
+  if (shape.kind === "mesh") return meshShapeFaces(geometry);
 
   const surface = SURFACE_KINDS[shape.kind];
   const isRoundedBox = shape.kind === "box" && Boolean(shape.radius && shape.radius > 0);

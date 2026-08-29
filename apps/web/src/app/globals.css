@@ -4426,6 +4426,43 @@ button {
   cursor: crosshair;
 }
 
+.workplane-wrap.seam-mode .three-workplane-host,
+.workplane-wrap.seam-mode .three-workplane-host:active {
+  cursor: crosshair;
+}
+
+.seam-flip-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  justify-content: center;
+  min-height: 36px;
+  color: #415a6e;
+  background: #f6f9fb;
+  border: 1px solid #c9d8e2;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.seam-flip-button[aria-pressed="true"] {
+  color: #176f95;
+  background: #e8f4fa;
+  border-color: #9ec9df;
+}
+
+.seam-summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  color: #415a6e;
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.45;
+}
+
 .three-workplane-host canvas {
   display: block;
   width: 100%;

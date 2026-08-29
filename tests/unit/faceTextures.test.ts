@@ -83,11 +83,13 @@ describe("faceTextures helpers", () => {
   it("labels face ids", () => {
     expect(faceLabelForId("top")).toBe("Top");
     expect(faceLabelForId("frontSlope")).toBe("FrontSlope");
+    expect(faceLabelForId("surface-0")).toBe("Surface 0");
+    expect(faceLabelForId("surface-12")).toBe("Surface 12");
   });
 
-  it("rejects imported meshes and sketch bodies", () => {
+  it("supports meshes but rejects sketch bodies", () => {
     expect(isFaceTextureSupportedKind("box")).toBe(true);
-    expect(isFaceTextureSupportedKind("mesh")).toBe(false);
+    expect(isFaceTextureSupportedKind("mesh")).toBe(true);
     expect(isFaceTextureSupportedKind("sketch")).toBe(false);
   });
 
@@ -151,6 +153,80 @@ describe("computeShapeFaces", () => {
         expect(v).toBeLessThanOrEqual(1);
       }
     }
+  });
+});
+
+describe("mesh face clustering", () => {
+  it("clusters a mesh into deterministic surface-N faces", () => {
+    const faces = computeShapeFaces(shape({ kind: "mesh" }), interleavedBoxSoup());
+    expect(faces.length).toBe(6);
+    faces.forEach((face, index) => {
+      expect(face.id).toBe(`surface-${index}`);
+      expect(face.label).toBe(`Surface ${index}`);
+      expect(face.uv).toBe("planar");
+      expect(face.normal).not.toBeNull();
+    });
+    const covered = faces.reduce((sum, face) => sum + face.triangles.length, 0);
+    expect(covered).toBe(12);
+  });
+
+  it("keeps mesh face ids and triangle sets stable across runs", () => {
+    const first = computeShapeFaces(shape({ kind: "mesh" }), interleavedBoxSoup());
+    const second = computeShapeFaces(shape({ kind: "mesh" }), interleavedBoxSoup());
+    expect(first.map((face) => face.id)).toEqual(second.map((face) => face.id));
+    first.forEach((face) => {
+      const again = second.find((candidate) => candidate.id === face.id);
+      expect(again).toBeDefined();
+      expect(again!.triangles).toEqual(face.triangles);
+    });
+  });
+
+  it("caps curved meshes to at most MAX_MESH_FACES with full coverage", () => {
+    const geometry = new THREE.SphereGeometry(1, 12, 8).toNonIndexed();
+    const triangleCount = geometry.getAttribute("position").count / 3;
+    const faces = computeShapeFaces(shape({ kind: "mesh" }), geometry);
+    expect(faces.length).toBeLessThanOrEqual(16);
+    const covered = faces.reduce((sum, face) => sum + face.triangles.length, 0);
+    expect(covered).toBe(triangleCount);
+  });
+
+  it("reorders a textured mesh into contiguous groups with generated UVs", () => {
+    const geometry = interleavedBoxSoup();
+    const textured = shape({
+      kind: "mesh",
+      faceTextures: { "surface-0": { dataUrl: "data:image/png;base64,x", mimeType: "image/png", pixelWidth: 2, pixelHeight: 2, useAsBump: false, bumpScale: 0.05 } },
+    });
+    applyFaceTexturesToGeometry(geometry, textured);
+
+    expect(geometry.getAttribute("uv")).toBeDefined();
+    const faces = computeShapeFaces(textured, geometry);
+    expect(geometry.groups.length).toBe(faces.length);
+    expect(geometry.groups.reduce((sum, group) => sum + group.count, 0)).toBe(geometry.getAttribute("position").count);
+    geometry.groups.forEach((group) => {
+      expect(group.count % 3).toBe(0);
+      expect(group.materialIndex).toBeGreaterThanOrEqual(0);
+    });
+
+    const uvs = geometry.getAttribute("uv");
+    const face = faces.find((candidate) => candidate.id === "surface-0");
+    expect(face).toBeDefined();
+    for (let triangle = 0; triangle < face!.triangles.length; triangle += 1) {
+      for (let corner = 0; corner < 3; corner += 1) {
+        expect(uvs.getX(face!.triangles[triangle] * 3 + corner)).toBeGreaterThanOrEqual(0);
+        expect(uvs.getX(face!.triangles[triangle] * 3 + corner)).toBeLessThanOrEqual(1);
+        expect(uvs.getY(face!.triangles[triangle] * 3 + corner)).toBeGreaterThanOrEqual(0);
+        expect(uvs.getY(face!.triangles[triangle] * 3 + corner)).toBeLessThanOrEqual(1);
+      }
+    }
+  });
+
+  it("tokens serialize surface-N ids", () => {
+    const textured = shape({
+      kind: "mesh",
+      faceTextures: { "surface-0": { dataUrl: "data:image/png;base64,x", mimeType: "image/png", pixelWidth: 2, pixelHeight: 2, useAsBump: false, bumpScale: 0.05 } },
+    });
+    expect(faceTextureGeometryToken(textured)).toContain("surface-0");
+    expect(faceTextureMaterialToken(textured)).toContain("surface-0");
   });
 });
 
