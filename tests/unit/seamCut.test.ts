@@ -126,11 +126,29 @@ describe("layoutSeamKeys", () => {
     const layout = layoutSeamKeys(plane, BOX, baseSpec())!;
     expect(layout.tenonPolygon).toEqual(seamKeyTenonPolygon(baseSpec()));
     const socket = seamKeySocketPolygon(baseSpec());
-    // Socket flares wider than the tenon at the tip (positive-V tip corner).
-    expect(socket[3][1]).toBeGreaterThan(layout.tenonPolygon[3][1]);
-    // Clearance widens throat and extends depth.
-    expect(socket[1][1]).toBeCloseTo(-(baseSpec().keyThroat + baseSpec().clearance));
-    expect(socket[2][0]).toBeCloseTo(baseSpec().keyDepth + baseSpec().clearance);
+    // Socket flares wider than the tenon at the tip (negative-X tip end corner,
+    // facing into the socket half).
+    expect(Math.abs(socket[0][1])).toBeGreaterThan(Math.abs(layout.tenonPolygon[0][1]));
+    // Clearance widens throat and extends depth beyond the tenon.
+    expect(socket[1][0]).toBeCloseTo(0);
+    expect(socket[0][0]).toBeCloseTo(-(baseSpec().keyDepth + baseSpec().clearance));
+    expect(Math.abs(socket[1][1])).toBeCloseTo(baseSpec().keyThroat + baseSpec().clearance);
+  });
+
+  it("flares the tenon into the socket half by default and mirrors with flareSign", () => {
+    const tenon = seamKeyTenonPolygon(baseSpec());
+    // Default flareSign = -1: the widest (±V) tip sits at the negative-X end,
+    // deep in the socket half; the seam-plane vertices (x = 0) carry the narrow
+    // throat so the dovetail cannot be pulled straight out.
+    expect(tenon[0][0]).toBeCloseTo(-baseSpec().keyDepth);
+    expect(tenon[2][0]).toBeCloseTo(baseSpec().keyBuried);
+    expect(Math.abs(tenon[0][1])).toBeGreaterThan(Math.abs(tenon[1][1]));
+    // Flare does not cross the seam plane: at the seam the width is the throat.
+    expect(Math.abs(tenon[1][1])).toBeCloseTo(baseSpec().keyThroat);
+    // flareSign = 1 restores the mirrored form (flare on the +normal side).
+    const flipped = seamKeyTenonPolygon(baseSpec(), 1);
+    expect(flipped[0][0]).toBeCloseTo(baseSpec().keyDepth);
+    expect(flipped[2][0]).toBeCloseTo(-baseSpec().keyBuried);
   });
 });
 

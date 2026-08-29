@@ -4419,8 +4419,9 @@ function seamKeyPrism(
   const crossSection = new runtime.CrossSection([polygon]);
   const extruded = crossSection.extrude(width, 0, 0, [1, 1]);
   disposeManifold(crossSection);
-  created.push(extruded);
-  return trackManifold(created, extruded.transform(manifoldTransformFromMatrix(seamKeyMatrix(key.center, plane))));
+  trackManifold(created, extruded);
+  const centered = trackManifold(created, extruded.translate([0, 0, -width / 2]));
+  return trackManifold(created, centered.transform(manifoldTransformFromMatrix(seamKeyMatrix(key.center, plane))));
 }
 
 function manifoldPositionsToMeshData(positions: number[]): MeshData | null {
@@ -4490,7 +4491,8 @@ async function seamCutHalfShapes(
     const socketHalf = pickHalf(pinSide === 1 ? -1 : 1);
 
     const spec = seamKeySpecFromOptions(options);
-    const layout = layoutSeamKeys(plane, box, spec);
+    const flareSign: -1 | 1 = options.flip ? 1 : -1;
+    const layout = layoutSeamKeys(plane, box, spec, flareSign);
     if (!layout || layout.keys.length === 0) {
       return null;
     }

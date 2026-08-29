@@ -5,6 +5,9 @@ export type SeamVec3 = [number, number, number];
 // The cut plane is perpendicular to the shape face at the first picked point
 // and contains the drawn seam line. `normal` points at the half that keeps the
 // pins, `tangent` runs along the seam, `faceUp` is the in-plane vertical.
+// In the key cross-section (normal × faceUp), the seam plane sits at
+// normal = 0; tenon/socket polygons place the flared tip toward the *other*
+// half (negative normal by default) so the dovetail locks the halves together.
 export type SeamPlane = {
   point: SeamVec3;
   normal: SeamVec3;
@@ -158,30 +161,43 @@ export function clampSeamKeyCount(requested: number, span: number, keyWidth: num
   return Math.max(1, Math.min(Math.floor(requested), allowed));
 }
 
-export function seamKeyTenonPolygon(spec: SeamKeySpec): Array<[number, number]> {
+function tenonCrossSection(spec: SeamKeySpec, flareSign: 1 | -1): Array<[number, number]> {
+  // CW-wound dovetail in the plane's (normal × faceUp) frame. The flared tip
+  // sits deep in the *other* half along the normal axis: at -keyDepth when
+  // flareSign = -1 (default), so the flare locks into the socket half, and at
+  // +keyDepth when mirrored (flareSign = +1). Vertices are order-stable so the
+  // cross section always extrudes with valid clockwise winding.
+  if (flareSign === -1) {
+    return [
+      [-spec.keyDepth, -spec.keyFlare],
+      [0, -spec.keyThroat],
+      [spec.keyBuried, -spec.keyThroat],
+      [spec.keyBuried, spec.keyThroat],
+      [0, spec.keyThroat],
+      [-spec.keyDepth, spec.keyFlare],
+    ];
+  }
   return [
-    [-spec.keyBuried, -spec.keyThroat],
-    [0, -spec.keyThroat],
     [spec.keyDepth, -spec.keyFlare],
-    [spec.keyDepth, spec.keyFlare],
-    [0, spec.keyThroat],
+    [0, -spec.keyThroat],
+    [-spec.keyBuried, -spec.keyThroat],
     [-spec.keyBuried, spec.keyThroat],
+    [0, spec.keyThroat],
+    [spec.keyDepth, spec.keyFlare],
   ];
 }
 
-export function seamKeySocketPolygon(spec: SeamKeySpec): Array<[number, number]> {
+export function seamKeyTenonPolygon(spec: SeamKeySpec, flareSign: 1 | -1 = -1): Array<[number, number]> {
+  return tenonCrossSection(spec, flareSign);
+}
+
+export function seamKeySocketPolygon(spec: SeamKeySpec, flareSign: 1 | -1 = -1): Array<[number, number]> {
   const clearance = spec.clearance;
-  return [
-    [-(spec.keyBuried + clearance), -(spec.keyThroat + clearance)],
-    [-clearance, -(spec.keyThroat + clearance)],
-    [spec.keyDepth + clearance, -(spec.keyFlare + clearance)],
-    [spec.keyDepth + clearance, spec.keyFlare + clearance],
-    [-clearance, spec.keyThroat + clearance],
-    [-(spec.keyBuried + clearance), spec.keyThroat + clearance],
-  ];
+  const inner = tenonCrossSection({ ...spec, keyThroat: spec.keyThroat + clearance, keyDepth: spec.keyDepth + clearance, keyFlare: spec.keyFlare + clearance }, flareSign);
+  return inner;
 }
 
-export function layoutSeamKeys(plane: SeamPlane, box: SeamBox, spec: SeamKeySpec): SeamKeyLayout | null {
+export function layoutSeamKeys(plane: SeamPlane, box: SeamBox, spec: SeamKeySpec, flareSign: 1 | -1 = -1): SeamKeyLayout | null {
   const interval = seamLineInterval(box, plane);
   if (!interval) {
     return null;
@@ -210,8 +226,8 @@ export function layoutSeamKeys(plane: SeamPlane, box: SeamBox, spec: SeamKeySpec
   return {
     keys,
     count,
-    tenonPolygon: seamKeyTenonPolygon(spec),
-    socketPolygon: seamKeySocketPolygon(spec),
+    tenonPolygon: seamKeyTenonPolygon(spec, flareSign),
+    socketPolygon: seamKeySocketPolygon(spec, flareSign),
     socketOffset: spec.clearance,
   };
 }
